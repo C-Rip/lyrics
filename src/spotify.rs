@@ -42,8 +42,12 @@ pub fn cache_dir() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache").join("lyrics")
 }
 
+pub(crate) fn state_dir() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("lyrics")
+}
+
 fn auth_path() -> PathBuf {
-    xdg("XDG_STATE_HOME", ".local/state").join("lyrics/spotify-auth.json")
+    state_dir().join("spotify-auth.json")
 }
 
 fn sptlrx_auth_path() -> PathBuf {

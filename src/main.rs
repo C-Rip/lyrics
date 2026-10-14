@@ -7,6 +7,7 @@ mod render;
 mod scene;
 mod spectrum;
 mod spotify;
+mod translate;
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -35,32 +36,75 @@ const USAGE: &str = "\
 Uso:
   lyrics                               letras de Spotify con el espectro de audio detrás
   lyrics --demo                        audio y letra de prueba
+  lyrics --translate <idioma>          traduce la letra (vale junto con --demo)
   lyrics login <client_id> <secret> [puerto]
                                        inicia sesión en Spotify (puerto por defecto 8888)
+  lyrics deepl <clave>                 guarda la clave de DeepL
+
+Idiomas: es, en, pt, fr, de, it, ja, ko, zh, ru
+         (también spanish, español, english, …)
 
 Teclas:
   q, Esc, Ctrl+C       salir
   flechas, j/k, rueda  recorrer la letra en pausa (vuelve sola al dar play)
   RePág/AvPág          media pantalla
   Inicio               volver a la línea que suena
-  espacio              pausa (solo en --demo)";
+  espacio              pausa (solo en --demo)
+  t                    original o traducción (con --translate)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        None => run(false),
-        Some("--demo") => run(true),
-        Some("login") => login(&args[1..]),
-        Some("-h" | "--help") => {
-            println!("{USAGE}");
-            Ok(())
-        }
-        Some(other) => Err(format!("argumento desconocido: {other}\n\n{USAGE}")),
-    };
-    if let Err(e) = result {
+    if let Err(e) = dispatch(&args) {
         eprintln!("{e}");
         std::process::exit(1);
     }
+}
+
+fn dispatch(args: &[String]) -> Result<(), String> {
+    if let Some(cmd) = args.first().map(String::as_str) {
+        match cmd {
+            "login" => return login(&args[1..]),
+            "deepl" => return save_deepl(&args[1..]),
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    let mut demo = false;
+    let mut lang = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--demo" => demo = true,
+            "--translate" => {
+                let name = rest
+                    .next()
+                    .ok_or_else(|| format!("falta el idioma después de --translate\n\n{USAGE}"))?;
+                lang = Some(
+                    translate::parse_lang(name)
+                        .ok_or_else(|| format!("idioma desconocido: {name}\n\n{USAGE}"))?,
+                );
+            }
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            other => return Err(format!("argumento desconocido: {other}\n\n{USAGE}")),
+        }
+    }
+    run(demo, lang)
+}
+
+fn save_deepl(args: &[String]) -> Result<(), String> {
+    let Some(key) = args.first() else {
+        return Err(USAGE.into());
+    };
+    if args.len() != 1 {
+        return Err(USAGE.into());
+    }
+    translate::save_key(key)
 }
 
 fn login(args: &[String]) -> Result<(), String> {
@@ -82,20 +126,22 @@ enum Source {
     Demo {
         started: Instant,
         paused_at: Option<Instant>,
-        lyrics: Arc<Lyrics>,
+        original: Arc<Lyrics>,
+        translated: Option<Arc<Lyrics>>,
+        show_translation: bool,
         track: Arc<Track>,
     },
 }
 
 impl Source {
-    fn live() -> Self {
+    fn live(lang: Option<translate::Lang>) -> Self {
         Source::Live {
             audio: AudioTap::start(),
-            player: Player::start(),
+            player: Player::start(lang),
         }
     }
 
-    fn demo() -> Self {
+    fn demo(lang: Option<translate::Lang>) -> Result<Self, String> {
         let lines = [
             "Could fill an hour",
             "They call me iron man",
@@ -112,13 +158,19 @@ impl Source {
             "This is my only chance",
             "I ain't about to throw it",
         ];
-        Source::Demo {
+        let original = Lyrics::Synced {
+            times: (0..lines.len() as u64).map(|i| i * 2000).collect(),
+            lines: lines.iter().map(|s| s.to_string()).collect(),
+        };
+        let translated = lang
+            .map(|lang| translate::blocking("demo", &original, &lang).map(Arc::new))
+            .transpose()?;
+        Ok(Source::Demo {
             started: Instant::now(),
             paused_at: None,
-            lyrics: Arc::new(Lyrics::Synced {
-                times: (0..lines.len() as u64).map(|i| i * 2000).collect(),
-                lines: lines.iter().map(|s| s.to_string()).collect(),
-            }),
+            show_translation: translated.is_some(),
+            original: Arc::new(original),
+            translated,
             track: Arc::new(Track {
                 id: "demo".into(),
                 title: "Demo".into(),
@@ -126,7 +178,7 @@ impl Source {
                 main_artist: "lyrics".into(),
                 duration_ms: 28_000,
             }),
-        }
+        })
     }
 
     /// Solo en el demo: la pausa de Spotify se controla desde Spotify.
@@ -139,6 +191,19 @@ impl Source {
                 Some(at) => *started += at.elapsed(),
                 None => *paused_at = Some(Instant::now()),
             }
+        }
+    }
+
+    /// Con `--translate`, alterna entre la letra traducida y la original.
+    fn toggle_translation(&mut self) {
+        match self {
+            Source::Live { player, .. } => player.toggle_translation(),
+            Source::Demo {
+                translated: Some(_),
+                show_translation,
+                ..
+            } => *show_translation = !*show_translation,
+            Source::Demo { .. } => {}
         }
     }
 
@@ -179,7 +244,9 @@ impl Source {
             Source::Demo {
                 started,
                 paused_at,
-                lyrics,
+                original,
+                translated,
+                show_translation,
                 track,
             } => {
                 let elapsed = paused_at
@@ -187,18 +254,26 @@ impl Source {
                     .duration_since(*started);
                 View {
                     track: Some(Arc::clone(track)),
-                    lyrics: Arc::clone(lyrics),
+                    lyrics: player::visible_lyrics(*show_translation, original, translated),
                     position_ms: elapsed.as_millis() as u64 % track.duration_ms,
                     playing: paused_at.is_none(),
                     message: None,
+                    notice: None,
                 }
             }
         }
     }
 }
 
-fn run(demo: bool) -> Result<(), String> {
-    let mut source = if demo { Source::demo() } else { Source::live() };
+fn run(demo: bool, lang: Option<translate::Lang>) -> Result<(), String> {
+    if lang.is_some() {
+        translate::api_key()?;
+    }
+    let mut source = if demo {
+        Source::demo(lang)?
+    } else {
+        Source::live(lang)
+    };
 
     let mut stdout = io::stdout();
     terminal::enable_raw_mode().map_err(|e| e.to_string())?;
@@ -290,6 +365,7 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                             KeyCode::PageDown => pane.scroll_by(page),
                             KeyCode::Home => pane.scroll_reset(),
                             KeyCode::Char(' ') => source.toggle_pause(),
+                            KeyCode::Char('t') => source.toggle_translation(),
                             _ => {}
                         }
                         idle_frames = 0;

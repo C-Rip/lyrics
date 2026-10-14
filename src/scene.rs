@@ -89,7 +89,16 @@ pub enum Kind {
 
 type Rows = Vec<Option<(String, Kind)>>;
 
-type PaneKey = (usize, usize, usize, isize, usize, usize, Option<String>);
+type PaneKey = (
+    usize,
+    usize,
+    usize,
+    isize,
+    usize,
+    usize,
+    Option<String>,
+    Option<String>,
+);
 
 /// Guarda la última disposición de la letra para no recalcularla en cada frame.
 pub struct LyricsPane {
@@ -160,9 +169,19 @@ impl LyricsPane {
             } else {
                 None
             },
+            view.notice.clone(),
         );
         if self.key.as_ref() != Some(&key) {
             self.rows = build(view, index, self.scroll, frame.width, frame.height);
+            if let Some(notice) = &view.notice
+                && let Some(row) = self.rows.last_mut()
+            {
+                let text = wrap(notice, frame.width)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                *row = Some((text, Kind::After));
+            }
             self.key = Some(key);
         }
         for (y, row) in self.rows.iter().enumerate() {
@@ -340,6 +359,7 @@ mod tests {
             position_ms,
             playing,
             message: None,
+            notice: None,
         }
     }
 

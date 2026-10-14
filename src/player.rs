@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::lyrics::{self, Lyrics};
 use crate::spotify::{self, Now, Spotify, Track};
+use crate::translate::{self, Job, Lang};
 
 const POLL: Duration = Duration::from_secs(2);
 /// En pausa se consulta más seguido para detectar pronto el play y volver a
@@ -25,13 +26,22 @@ pub struct View {
     pub position_ms: u64,
     pub playing: bool,
     pub message: Option<String>,
+    pub notice: Option<String>,
 }
 
-struct State {
-    now: Option<Now>,
+pub(crate) struct State {
+    pub(crate) now: Option<Now>,
     at: Instant,
-    lyrics: Arc<Lyrics>,
+    /// Letra de lrclib, o el estado de carga.
+    original: Arc<Lyrics>,
+    /// Traducción de esa letra, cuando ya está lista.
+    pub(crate) translated: Option<Arc<Lyrics>>,
+    /// El usuario quiere ver la traducción. Se conserva al cambiar de canción.
+    show_translation: bool,
+    /// Hubo `--translate`, así que la tecla `t` puede alternar.
+    translate: bool,
     message: Option<String>,
+    pub(crate) notice: Option<String>,
 }
 
 /// Consulta Spotify en segundo plano. Entre consultas, la posición avanza con el reloj local.
@@ -40,17 +50,22 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn start() -> Self {
+    pub fn start(lang: Option<Lang>) -> Self {
         let state = Arc::new(Mutex::new(State {
             now: None,
             at: Instant::now(),
-            lyrics: Arc::new(Lyrics::Loading),
+            original: Arc::new(Lyrics::Loading),
+            translated: None,
+            show_translation: lang.is_some(),
+            translate: lang.is_some(),
             message: Some("Conectando con Spotify".into()),
+            notice: None,
         }));
         let shared = Arc::clone(&state);
+        let jobs = lang.map(|lang| translate::spawn(lang, Arc::clone(&state)));
         thread::Builder::new()
             .name("spotify".into())
-            .spawn(move || run(&shared))
+            .spawn(move || run(&shared, lang, jobs))
             .expect("no se pudo crear el hilo de Spotify");
         Self { state }
     }
@@ -69,15 +84,24 @@ impl Player {
         });
         View {
             track: state.now.as_ref().map(|now| Arc::clone(&now.track)),
-            lyrics: Arc::clone(&state.lyrics),
+            lyrics: visible_lyrics(state.show_translation, &state.original, &state.translated),
             position_ms,
             playing: state.now.as_ref().is_some_and(|now| now.playing),
             message: state.message.clone(),
+            notice: state.notice.clone(),
+        }
+    }
+
+    /// Vuelve a la letra original o a la traducción. No hace nada sin `--translate`.
+    pub fn toggle_translation(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.translate {
+            state.show_translation = !state.show_translation;
         }
     }
 }
 
-fn run(state: &Mutex<State>) {
+fn run(state: &Mutex<State>, lang: Option<Lang>, jobs: Option<std::sync::mpsc::Sender<Job>>) {
     lyrics::migrate_cache();
     let agent = spotify::http_agent();
     let mut client = loop {
@@ -111,7 +135,9 @@ fn run(state: &Mutex<State>) {
                     s.at = requested;
                     s.message = None;
                     if changed {
-                        s.lyrics = Arc::new(Lyrics::Loading);
+                        s.original = Arc::new(Lyrics::Loading);
+                        s.translated = None;
+                        s.notice = None;
                     }
                 }
                 let due = retry.as_ref().is_some_and(|(at, _)| requested >= *at);
@@ -131,15 +157,30 @@ fn run(state: &Mutex<State>) {
                         }
                         _ => None,
                     };
-                    let mut s = state.lock().unwrap();
-                    if s.now.as_ref().is_some_and(|n| n.track.id == track.id) {
-                        let same_failure = match (&*found, &*s.lyrics) {
-                            (Lyrics::Retrying(next), Lyrics::Retrying(prev)) => next == prev,
-                            _ => false,
-                        };
-                        if !same_failure {
-                            s.lyrics = found;
+                    let (original, translated, pending) = match lang {
+                        Some(lang) => prepare_translation(&track.id, &found, &lang),
+                        None => (found, None, None),
+                    };
+                    let pending = {
+                        let mut s = state.lock().unwrap();
+                        if s.now.as_ref().is_some_and(|n| n.track.id == track.id) {
+                            let same_failure = match (&*original, &*s.original) {
+                                (Lyrics::Retrying(next), Lyrics::Retrying(prev)) => next == prev,
+                                _ => false,
+                            };
+                            if !same_failure {
+                                s.original = original;
+                                s.translated = translated;
+                            }
+                            pending.filter(|_| !same_failure)
+                        } else {
+                            None
                         }
+                    };
+                    if let Some(job) = pending
+                        && let Some(jobs) = &jobs
+                    {
+                        let _ = jobs.send(job);
                     }
                 }
                 if let Some((at, _)) = retry {
@@ -152,7 +193,9 @@ fn run(state: &Mutex<State>) {
                 retry = None;
                 let mut s = state.lock().unwrap();
                 s.now = None;
-                s.lyrics = Arc::new(Lyrics::NotFound);
+                s.original = Arc::new(Lyrics::NotFound);
+                s.translated = None;
+                s.notice = None;
                 s.message = Some("Nada sonando en Spotify".into());
                 POLL
             }
@@ -163,6 +206,38 @@ fn run(state: &Mutex<State>) {
         };
         thread::sleep(wait.saturating_sub(requested.elapsed()));
     }
+}
+
+/// Si la traducción ya está en disco, la devuelve. Si no, deja la original y
+/// pide traducirla en el otro hilo.
+fn prepare_translation(
+    track_id: &str,
+    found: &Arc<Lyrics>,
+    lang: &Lang,
+) -> (Arc<Lyrics>, Option<Arc<Lyrics>>, Option<Job>) {
+    if let Some(hit) = translate::cached(track_id, found, lang) {
+        return (Arc::clone(found), Some(Arc::new(hit)), None);
+    }
+    let pending = lines_pending(found).then(|| Job {
+        track_id: track_id.to_string(),
+        lyrics: Arc::clone(found),
+    });
+    (Arc::clone(found), None, pending)
+}
+
+pub(crate) fn visible_lyrics(
+    show_translation: bool,
+    original: &Arc<Lyrics>,
+    translated: &Option<Arc<Lyrics>>,
+) -> Arc<Lyrics> {
+    if show_translation && let Some(translated) = translated {
+        return Arc::clone(translated);
+    }
+    Arc::clone(original)
+}
+
+fn lines_pending(lyrics: &Lyrics) -> bool {
+    matches!(lyrics, Lyrics::Synced { .. } | Lyrics::Plain(_))
 }
 
 #[cfg(test)]
@@ -188,5 +263,27 @@ mod tests {
                 Duration::from_secs(60),
             ]
         );
+    }
+
+    #[test]
+    fn toggle_keeps_the_original_until_asked_again() {
+        let original = Arc::new(Lyrics::Plain(vec!["hello".into()]));
+        let translated = Some(Arc::new(Lyrics::Plain(vec!["hola".into()])));
+        let text = |lyrics: &Lyrics| match lyrics {
+            Lyrics::Plain(lines) => lines.clone(),
+            _ => panic!("no es texto"),
+        };
+        assert_eq!(
+            text(&visible_lyrics(true, &original, &translated)),
+            ["hola"]
+        );
+        assert_eq!(
+            text(&visible_lyrics(false, &original, &translated)),
+            ["hello"]
+        );
+        assert!(Arc::ptr_eq(
+            &visible_lyrics(true, &original, &None),
+            &original
+        ));
     }
 }
