@@ -1,6 +1,6 @@
 use crate::lyrics::Lyrics;
 use crate::player::View;
-use crate::render::{text_width, Frame, Rgb, BOLD, FAINT};
+use crate::render::{BOLD, FAINT, Frame, Rgb, text_width};
 
 pub struct Style {
     pub fg: Rgb,
@@ -64,7 +64,8 @@ pub fn bar_layout(cols: usize) -> BarLayout {
 pub fn draw_bars(frame: &mut Frame, layout: &BarLayout, values: &[f32]) {
     let eighths_max = frame.height * 8;
     for (i, &value) in values.iter().take(layout.count).enumerate() {
-        let eighths = ((value.clamp(0.0, 1.0) * eighths_max as f32).round() as usize).clamp(1, eighths_max);
+        let eighths =
+            ((value.clamp(0.0, 1.0) * eighths_max as f32).round() as usize).clamp(1, eighths_max);
         let full = eighths / 8;
         let partial = eighths % 8;
         let x0 = layout.column(i);
@@ -129,7 +130,9 @@ impl LyricsPane {
                 if view.playing {
                     self.scroll = 0;
                 }
-                let index = times.partition_point(|&t| t <= view.position_ms).saturating_sub(1);
+                let index = times
+                    .partition_point(|&t| t <= view.position_ms)
+                    .saturating_sub(1);
                 let last = lines.len().saturating_sub(1) as isize;
                 self.scroll = self.scroll.clamp(-(index as isize), last - index as isize);
                 index
@@ -145,12 +148,18 @@ impl LyricsPane {
         };
         let key = (
             lyrics_id,
-            view.track.as_ref().map_or(0, |t| std::sync::Arc::as_ptr(t) as usize),
+            view.track
+                .as_ref()
+                .map_or(0, |t| std::sync::Arc::as_ptr(t) as usize),
             index,
             self.scroll,
             frame.width,
             frame.height,
-            if view.track.is_none() { view.message.clone() } else { None },
+            if view.track.is_none() {
+                view.message.clone()
+            } else {
+                None
+            },
         );
         if self.key.as_ref() != Some(&key) {
             self.rows = build(view, index, self.scroll, frame.width, frame.height);
@@ -185,6 +194,7 @@ fn build(view: &View, index: usize, scroll: isize, cols: usize, rows: usize) -> 
         Lyrics::Loading => note("buscando letra"),
         Lyrics::Instrumental => note("instrumental"),
         Lyrics::NotFound => note("sin letra disponible"),
+        Lyrics::Retrying(_) => note("lrclib saturado, reintentando"),
         Lyrics::Failed(e) => note(e),
     }
 }
@@ -192,7 +202,13 @@ fn build(view: &View, index: usize, scroll: isize, cols: usize, rows: usize) -> 
 /// Como sptlrx: la línea `center` queda en el centro vertical, con las
 /// anteriores arriba y las siguientes abajo. El estilo depende de su posición
 /// respecto a `highlight`, la línea que está sonando.
-pub fn layout(lines: &[String], center: usize, highlight: Option<usize>, cols: usize, rows: usize) -> Rows {
+pub fn layout(
+    lines: &[String],
+    center: usize,
+    highlight: Option<usize>,
+    cols: usize,
+    rows: usize,
+) -> Rows {
     let mut out: Rows = vec![None; rows];
     if lines.is_empty() || rows == 0 || cols == 0 {
         return out;

@@ -128,7 +128,8 @@ impl Screen {
             out.push_str("\x1b[0m\x1b[2J");
         }
 
-        let mut pen: Option<(Option<Rgb>, Option<Rgb>, u8)> = if full { Some((None, None, 0)) } else { None };
+        let mut pen: Option<(Option<Rgb>, Option<Rgb>, u8)> =
+            if full { Some((None, None, 0)) } else { None };
         let mut cursor: Option<(usize, usize)> = None;
 
         for y in 0..frame.height {
@@ -143,7 +144,8 @@ impl Screen {
                 let span = if wide { 2 } else { 1 };
                 let changed = match &self.prev {
                     Some(prev) if !full => {
-                        prev.get(x, y) != cell || (wide && prev.get(x + 1, y) != frame.get(x + 1, y))
+                        prev.get(x, y) != cell
+                            || (wide && prev.get(x + 1, y) != frame.get(x + 1, y))
                     }
                     _ => cell != BLANK,
                 };

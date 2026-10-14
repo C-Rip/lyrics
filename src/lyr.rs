@@ -174,9 +174,15 @@ mod tests {
     #[test]
     fn plain_and_instrumental_round_trip() {
         let plain = Lyrics::Plain(vec!["a".into(), "b".into()]);
-        assert!(matches!(decode(&encode(&plain).unwrap()), Some(Lyrics::Plain(l)) if l == ["a", "b"]));
-        assert!(matches!(decode(&encode(&Lyrics::Instrumental).unwrap()), Some(Lyrics::Instrumental)));
+        assert!(
+            matches!(decode(&encode(&plain).unwrap()), Some(Lyrics::Plain(l)) if l == ["a", "b"])
+        );
+        assert!(matches!(
+            decode(&encode(&Lyrics::Instrumental).unwrap()),
+            Some(Lyrics::Instrumental)
+        ));
         assert!(encode(&Lyrics::NotFound).is_none());
+        assert!(encode(&Lyrics::Retrying("lrclib: 503".into())).is_none());
     }
 
     #[test]

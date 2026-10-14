@@ -88,7 +88,8 @@ impl Analyzer {
         for ((slot, &sample), &w) in self.buf.iter_mut().zip(samples).zip(&self.window) {
             *slot = Complex::new(sample * w, 0.0);
         }
-        self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
+        self.fft
+            .process_with_scratch(&mut self.buf, &mut self.scratch);
 
         let mut loudest = 0.0f32;
         for (band, raw) in self.bands.iter().zip(self.raw.iter_mut()) {

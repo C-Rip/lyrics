@@ -95,7 +95,9 @@ fn capture(ring: &Mutex<Ring>) -> Result<(), String> {
 
     let mut bytes = vec![0u8; CHUNK * 4];
     loop {
-        stream.read(&mut bytes).map_err(|e| format!("PulseAudio: {e:?}"))?;
+        stream
+            .read(&mut bytes)
+            .map_err(|e| format!("PulseAudio: {e:?}"))?;
         let mut ring = ring.lock().unwrap();
         for raw in bytes.as_chunks::<4>().0 {
             let pos = ring.pos;

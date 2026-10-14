@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 
 use crate::render::Rgb;
-use crate::scene::{BarLayout, BAR_WIDTH};
+use crate::scene::{BAR_WIDTH, BarLayout};
 
 /// Dos ids alternados: la imagen nueva se coloca antes de borrar la anterior,
 /// así nunca hay un frame sin barras.
@@ -20,7 +20,8 @@ const KEEP: Duration = Duration::from_secs(1);
 const MIN_HEIGHT_PX: usize = 2;
 
 pub fn supported() -> bool {
-    std::env::var_os("KITTY_WINDOW_ID").is_some() || std::env::var("TERM").is_ok_and(|t| t == "xterm-kitty")
+    std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || std::env::var("TERM").is_ok_and(|t| t == "xterm-kitty")
 }
 
 /// Capa de barras en píxeles debajo del texto (protocolo gráfico de Kitty, z=-1).
@@ -49,7 +50,9 @@ impl BarLayer {
             seq: 0,
             pending: VecDeque::new(),
         };
-        layer.resize(cols, rows, width_px, height_px).then_some(layer)
+        layer
+            .resize(cols, rows, width_px, height_px)
+            .then_some(layer)
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize, width_px: usize, height_px: usize) -> bool {
@@ -70,7 +73,8 @@ impl BarLayer {
         let mut changed = self.heights.len() != count;
         self.heights.resize(count, usize::MAX);
         for (slot, &value) in self.heights.iter_mut().zip(values) {
-            let px = ((value.clamp(0.0, 1.0) * self.height as f32).round() as usize).clamp(MIN_HEIGHT_PX, self.height);
+            let px = ((value.clamp(0.0, 1.0) * self.height as f32).round() as usize)
+                .clamp(MIN_HEIGHT_PX, self.height);
             if *slot != px {
                 *slot = px;
                 changed = true;
@@ -98,7 +102,8 @@ impl BarLayer {
             let template = (self.height - h) * stride + x0 * 4;
             for y in self.height - h + 1..self.height {
                 let start = y * stride + x0 * 4;
-                self.pixels.copy_within(template..template + (x1 - x0) * 4, start);
+                self.pixels
+                    .copy_within(template..template + (x1 - x0) * 4, start);
             }
         }
         self.dirty = true;
@@ -133,14 +138,24 @@ impl BarLayer {
     }
 
     fn store(&mut self) -> io::Result<String> {
-        while self.pending.front().is_some_and(|(t, _)| t.elapsed() > KEEP) {
+        while self
+            .pending
+            .front()
+            .is_some_and(|(t, _)| t.elapsed() > KEEP)
+        {
             let (_, name) = self.pending.pop_front().unwrap();
             unsafe { libc::shm_unlink(name.as_ptr()) };
         }
         self.seq += 1;
         let name = format!("/lyrics-{}-{}", std::process::id(), self.seq);
         let c_name = CString::new(name.clone()).expect("nombre sin NUL");
-        let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o600) };
+        let fd = unsafe {
+            libc::shm_open(
+                c_name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                0o600,
+            )
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }

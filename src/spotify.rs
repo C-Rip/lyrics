@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const PLAYING_URL: &str = "https://api.spotify.com/v1/me/player/currently-playing";
 const SCOPES: &str = "user-read-currently-playing user-read-playback-state";
-const USER_AGENT: &str = concat!("lyrics/", env!("CARGO_PKG_VERSION"), " (terminal lyrics visualizer)");
+const USER_AGENT: &str = concat!(
+    "lyrics/",
+    env!("CARGO_PKG_VERSION"),
+    " (terminal lyrics visualizer)"
+);
 
 pub fn http_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -22,7 +26,9 @@ pub fn http_agent() -> ureq::Agent {
 }
 
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
@@ -75,9 +81,11 @@ impl Auth {
             client_secret: String,
             refresh_token: String,
         }
-        let text = fs::read_to_string(sptlrx_auth_path())
-            .map_err(|_| "Sin sesión de Spotify. Ejecuta: lyrics login <client_id> <client_secret>".to_string())?;
-        let old: Sptlrx = serde_json::from_str(&text).map_err(|e| format!("sesión de sptlrx: {e}"))?;
+        let text = fs::read_to_string(sptlrx_auth_path()).map_err(|_| {
+            "Sin sesión de Spotify. Ejecuta: lyrics login <client_id> <client_secret>".to_string()
+        })?;
+        let old: Sptlrx =
+            serde_json::from_str(&text).map_err(|e| format!("sesión de sptlrx: {e}"))?;
         let auth = Auth {
             client_id: old.client_id,
             client_secret: old.client_secret,
@@ -186,8 +194,10 @@ impl Spotify {
     fn token(&mut self) -> Result<String, String> {
         if self.auth.access_token.is_empty() || self.auth.expires_at <= unix_now() + 30 {
             let refresh = self.auth.refresh_token.clone();
-            self.auth
-                .exchange(&self.agent, &[("grant_type", "refresh_token"), ("refresh_token", &refresh)])?;
+            self.auth.exchange(
+                &self.agent,
+                &[("grant_type", "refresh_token"), ("refresh_token", &refresh)],
+            )?;
         }
         Ok(self.auth.access_token.clone())
     }
@@ -221,11 +231,17 @@ fn into_now(playing: Playing) -> Option<Now> {
     let item = playing.item?;
     let names: Vec<&str> = item.artists.iter().map(|a| a.name.as_str()).collect();
     let artist = if names.is_empty() {
-        item.show.as_ref().map(|s| s.name.clone()).unwrap_or_default()
+        item.show
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
     } else {
         names.join(", ")
     };
-    let main_artist = names.first().map(|s| s.to_string()).unwrap_or_else(|| artist.clone());
+    let main_artist = names
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| artist.clone());
     let id = item
         .id
         .unwrap_or_else(|| format!("local-{artist}-{}", item.name));
@@ -321,7 +337,9 @@ fn encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
             _ => out.push_str(&format!("%{byte:02X}")),
         }
     }

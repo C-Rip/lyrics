@@ -20,7 +20,7 @@ use kitty::BarLayer;
 use lyrics::Lyrics;
 use player::{Player, View};
 use render::{Frame, Screen};
-use scene::{bar_layout, draw_bars, LyricsPane, THEME};
+use scene::{LyricsPane, THEME, bar_layout, draw_bars};
 use spectrum::Analyzer;
 use spotify::Track;
 
@@ -131,7 +131,10 @@ impl Source {
 
     /// Solo en el demo: la pausa de Spotify se controla desde Spotify.
     fn toggle_pause(&mut self) {
-        if let Source::Demo { started, paused_at, .. } = self {
+        if let Source::Demo {
+            started, paused_at, ..
+        } = self
+        {
             match paused_at.take() {
                 Some(at) => *started += at.elapsed(),
                 None => *paused_at = Some(Instant::now()),
@@ -144,11 +147,18 @@ impl Source {
             Source::Live { audio, .. } => {
                 audio.latest(out);
             }
-            Source::Demo { paused_at: Some(_), .. } => out.fill(0.0),
+            Source::Demo {
+                paused_at: Some(_), ..
+            } => out.fill(0.0),
             Source::Demo { started, .. } => {
                 let t = started.elapsed().as_secs_f32();
                 let beat = (1.0 - (t * 2.0).fract()).powi(3);
-                let tones = [(60.0, 0.6 * beat), (220.0, 0.25), (880.0, 0.12), (3500.0, 0.05)];
+                let tones = [
+                    (60.0, 0.6 * beat),
+                    (220.0, 0.25),
+                    (880.0, 0.12),
+                    (3500.0, 0.05),
+                ];
                 for (i, sample) in out.iter_mut().enumerate() {
                     let s = t + i as f32 / SAMPLE_RATE as f32;
                     *sample = tones
@@ -172,7 +182,9 @@ impl Source {
                 lyrics,
                 track,
             } => {
-                let elapsed = paused_at.unwrap_or_else(Instant::now).duration_since(*started);
+                let elapsed = paused_at
+                    .unwrap_or_else(Instant::now)
+                    .duration_since(*started);
                 View {
                     track: Some(Arc::clone(track)),
                     lyrics: Arc::clone(lyrics),
@@ -231,7 +243,12 @@ fn bar_layer(cols: u16, rows: u16) -> Option<BarLayer> {
         return None;
     }
     let size = terminal::window_size().ok()?;
-    BarLayer::new(cols as usize, rows as usize, size.width as usize, size.height as usize)
+    BarLayer::new(
+        cols as usize,
+        rows as usize,
+        size.width as usize,
+        size.height as usize,
+    )
 }
 
 fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
@@ -254,7 +271,8 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
             loop {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        let ctrl_c = key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+                        let ctrl_c = key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL);
                         if ctrl_c || matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                             if let Some(layer) = &mut layer {
                                 out.clear();
@@ -337,7 +355,11 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
         } else {
             idle_frames = idle_frames.saturating_add(1);
         }
-        let step = if idle_frames > IDLE_AFTER { IDLE_FRAME } else { ACTIVE_FRAME };
+        let step = if idle_frames > IDLE_AFTER {
+            IDLE_FRAME
+        } else {
+            ACTIVE_FRAME
+        };
         next = (next + step).max(now);
     }
 }

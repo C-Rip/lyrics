@@ -4,18 +4,28 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::lyr;
-use crate::spotify::{cache_dir, Track};
+use crate::spotify::{Track, cache_dir};
 
 const GET_URL: &str = "https://lrclib.net/api/get";
 const SEARCH_URL: &str = "https://lrclib.net/api/search";
 
 pub enum Lyrics {
     Loading,
-    Synced { times: Vec<u64>, lines: Vec<String> },
+    Synced {
+        times: Vec<u64>,
+        lines: Vec<String>,
+    },
     Plain(Vec<String>),
     Instrumental,
     NotFound,
+    /// lrclib saturado, timeout o red. No se guarda en caché.
+    Retrying(String),
     Failed(String),
+}
+
+enum LookupError {
+    Transient(String),
+    Fatal(String),
 }
 
 #[derive(Deserialize, Default)]
@@ -37,12 +47,16 @@ pub fn fetch(agent: &ureq::Agent, track: &Track) -> Lyrics {
     }
 
     let legacy = base.with_extension("json");
-    let record = match fs::read(&legacy).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+    let record = match fs::read(&legacy)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
         Some(record) => record,
         None => match lookup(agent, track) {
             Ok(Some(record)) => record,
             Ok(None) => return Lyrics::NotFound,
-            Err(e) => return Lyrics::Failed(e),
+            Err(LookupError::Transient(e)) => return Lyrics::Retrying(e),
+            Err(LookupError::Fatal(e)) => return Lyrics::Failed(e),
         },
     };
     let lyrics = from_record(record);
@@ -56,13 +70,18 @@ pub fn fetch(agent: &ureq::Agent, track: &Track) -> Lyrics {
 
 /// Convierte la caché JSON de versiones anteriores a `.lyr`.
 pub fn migrate_cache() {
-    let Ok(entries) = fs::read_dir(cache_dir()) else { return };
+    let Ok(entries) = fs::read_dir(cache_dir()) else {
+        return;
+    };
     for entry in entries.flatten() {
         let legacy = entry.path();
         if legacy.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let Some(record) = fs::read(&legacy).ok().and_then(|b| serde_json::from_slice::<Record>(&b).ok()) else {
+        let Some(record) = fs::read(&legacy)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Record>(&b).ok())
+        else {
             continue;
         };
         let stored = match lyr::encode(&from_record(record)) {
@@ -84,7 +103,7 @@ fn store(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-fn lookup(agent: &ureq::Agent, track: &Track) -> Result<Option<Record>, String> {
+fn lookup(agent: &ureq::Agent, track: &Track) -> Result<Option<Record>, LookupError> {
     let duration = (track.duration_ms / 1000).to_string();
     let exact = agent
         .get(GET_URL)
@@ -93,9 +112,14 @@ fn lookup(agent: &ureq::Agent, track: &Track) -> Result<Option<Record>, String> 
         .query("duration", &duration)
         .call();
     match exact {
-        Ok(resp) => return resp.into_json().map(Some).map_err(|e| format!("lrclib: {e}")),
+        Ok(resp) => {
+            return resp
+                .into_json()
+                .map(Some)
+                .map_err(|e| LookupError::Fatal(format!("lrclib: {e}")));
+        }
         Err(ureq::Error::Status(404, _)) => {}
-        Err(e) => return Err(format!("lrclib: {e}")),
+        Err(e) => return Err(classify(e)),
     }
 
     let mut results: Vec<Record> = agent
@@ -103,14 +127,46 @@ fn lookup(agent: &ureq::Agent, track: &Track) -> Result<Option<Record>, String> 
         .query("track_name", &track.title)
         .query("artist_name", &track.main_artist)
         .call()
-        .map_err(|e| format!("lrclib: {e}"))?
+        .map_err(classify)?
         .into_json()
-        .map_err(|e| format!("lrclib: {e}"))?;
+        .map_err(|e| LookupError::Fatal(format!("lrclib: {e}")))?;
     let best = results
         .iter()
         .position(|r| r.synced.as_deref().is_some_and(|s| !s.is_empty()))
         .unwrap_or(0);
     Ok((best < results.len()).then(|| results.swap_remove(best)))
+}
+
+fn classify(err: ureq::Error) -> LookupError {
+    let message = lrclib_message(&err);
+    if is_transient(&err) {
+        LookupError::Transient(message)
+    } else {
+        LookupError::Fatal(message)
+    }
+}
+
+fn is_transient(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Status(code, _) => transient_status(*code),
+        ureq::Error::Transport(_) => true,
+    }
+}
+
+/// 429 y 5xx se reintentan. El resto de códigos HTTP se muestran y no se repiten.
+fn transient_status(code: u16) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// Código o motivo, sin la URL que ureq incluye en el error.
+fn lrclib_message(err: &ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(code, _) => format!("lrclib: {code}"),
+        ureq::Error::Transport(transport) => match transport.message() {
+            Some(message) => format!("lrclib: {message}"),
+            None => format!("lrclib: {}", transport.kind()),
+        },
+    }
 }
 
 fn from_record(record: Record) -> Lyrics {
@@ -143,7 +199,9 @@ pub fn parse_lrc(source: &str) -> (Vec<u64>, Vec<String>) {
         let mut stamps = Vec::new();
         while let Some(after) = rest.strip_prefix('[') {
             let Some(end) = after.find(']') else { break };
-            let Some(ms) = parse_stamp(&after[..end]) else { break };
+            let Some(ms) = parse_stamp(&after[..end]) else {
+                break;
+            };
             stamps.push(ms);
             rest = &after[end + 1..];
         }
@@ -176,7 +234,8 @@ mod tests {
 
     #[test]
     fn parses_lrc_and_skips_metadata() {
-        let (times, lines) = parse_lrc("[ar:Someone]\n[00:03.500] world\n[00:01.50]hello\n[00:05.00]\n");
+        let (times, lines) =
+            parse_lrc("[ar:Someone]\n[00:03.500] world\n[00:01.50]hello\n[00:05.00]\n");
         assert_eq!(times, vec![1500, 3500, 5000]);
         assert_eq!(lines, vec!["hello", "world", ""]);
     }
@@ -186,5 +245,15 @@ mod tests {
         let (times, lines) = parse_lrc("[00:01.00][00:10.00]chorus");
         assert_eq!(times, vec![1000, 10_000]);
         assert_eq!(lines, vec!["chorus", "chorus"]);
+    }
+
+    #[test]
+    fn saturated_statuses_are_transient() {
+        for code in [429, 500, 503] {
+            assert!(transient_status(code), "{code}");
+        }
+        for code in [400, 401] {
+            assert!(!transient_status(code), "{code}");
+        }
     }
 }
