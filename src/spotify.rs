@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const PLAYING_URL: &str = "https://api.spotify.com/v1/me/player/currently-playing";
-const SCOPES: &str = "user-read-currently-playing user-read-playback-state";
+const PROFILE_URL: &str = "https://api.spotify.com/v1/me";
+const TOP_TRACKS_URL: &str = "https://api.spotify.com/v1/me/top/tracks";
+const SCOPES: &str =
+    "user-read-currently-playing user-read-playback-state user-top-read user-read-private";
 const USER_AGENT: &str = concat!(
     "lyrics/",
     env!("CARGO_PKG_VERSION"),
@@ -158,6 +161,53 @@ pub struct Now {
     pub playing: bool,
 }
 
+/// Periodo de las canciones más escuchadas.
+#[derive(Clone, Copy)]
+pub enum Period {
+    Short,
+    Medium,
+    Long,
+}
+
+impl Period {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "corto" => Some(Self::Short),
+            "mediano" => Some(Self::Medium),
+            "largo" => Some(Self::Long),
+            _ => None,
+        }
+    }
+
+    fn query(self) -> &'static str {
+        match self {
+            Self::Short => "short_term",
+            Self::Medium => "medium_term",
+            Self::Long => "long_term",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Short => "Últimas 4 semanas",
+            Self::Medium => "Últimos 6 meses",
+            Self::Long => "Cerca de un año",
+        }
+    }
+}
+
+pub struct Stats {
+    pub name: String,
+    pub country: String,
+    pub plan: String,
+    pub tracks: Vec<RankedTrack>,
+}
+
+pub struct RankedTrack {
+    pub title: String,
+    pub artist: String,
+}
+
 #[derive(Deserialize)]
 struct Playing {
     #[serde(default)]
@@ -229,6 +279,94 @@ impl Spotify {
         }
         Err("Spotify rechazó la sesión. Ejecuta: lyrics login".into())
     }
+
+    pub fn stats(&mut self, period: Period) -> Result<Stats, String> {
+        let me: Me = self.get_json(PROFILE_URL)?;
+        let country = me
+            .country
+            .filter(|c| !c.is_empty())
+            .ok_or_else(stats_scope)?;
+        let product = me
+            .product
+            .filter(|p| !p.is_empty())
+            .ok_or_else(stats_scope)?;
+        let url = format!("{}?time_range={}&limit=10", TOP_TRACKS_URL, period.query());
+        let top: TopTracks = self.get_json(&url)?;
+        Ok(Stats {
+            name: me.display_name.filter(|n| !n.is_empty()).unwrap_or(me.id),
+            country,
+            plan: plan_label(&product),
+            tracks: top
+                .items
+                .into_iter()
+                .map(|item| RankedTrack {
+                    artist: item
+                        .artists
+                        .iter()
+                        .map(|a| a.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    title: item.name,
+                })
+                .collect(),
+        })
+    }
+
+    fn get_json<T: for<'de> Deserialize<'de>>(&mut self, url: &str) -> Result<T, String> {
+        for attempt in 0..2 {
+            let token = self.token()?;
+            let response = self
+                .agent
+                .get(url)
+                .set("Authorization", &format!("Bearer {token}"))
+                .call();
+            match response {
+                Ok(resp) => {
+                    return resp.into_json().map_err(|e| format!("Spotify: {e}"));
+                }
+                Err(ureq::Error::Status(401, _)) if attempt == 0 => self.auth.expires_at = 0,
+                Err(ureq::Error::Status(403, _)) => return Err(stats_scope()),
+                Err(ureq::Error::Status(429, _)) => {
+                    return Err("Spotify limitó las peticiones, reintentando".into());
+                }
+                Err(e) => return Err(format!("Spotify: {e}")),
+            }
+        }
+        Err("Spotify rechazó la sesión. Ejecuta: lyrics login".into())
+    }
+}
+
+fn stats_scope() -> String {
+    "Faltan permisos de estadísticas. Vuelve a ejecutar: lyrics login".into()
+}
+
+fn plan_label(product: &str) -> String {
+    match product {
+        "premium" => "Premium".into(),
+        "free" | "open" => "Gratis".into(),
+        other => other.to_string(),
+    }
+}
+
+#[derive(Deserialize)]
+struct Me {
+    id: String,
+    display_name: Option<String>,
+    country: Option<String>,
+    product: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TopTracks {
+    #[serde(default)]
+    items: Vec<TopItem>,
+}
+
+#[derive(Deserialize)]
+struct TopItem {
+    name: String,
+    #[serde(default)]
+    artists: Vec<Named>,
 }
 
 fn into_now(playing: Playing) -> Option<Now> {

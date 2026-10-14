@@ -40,6 +40,8 @@ Uso:
   lyrics login <client_id> <secret> [puerto]
                                        inicia sesión en Spotify (puerto por defecto 8888)
   lyrics deepl <clave>                 guarda la clave de DeepL
+  lyrics stats [corto|mediano|largo]
+                                       top 10, país y plan (por defecto mediano)
 
 Idiomas: es, en, pt, fr, de, it, ja, ko, zh, ru
          (también spanish, español, english, …)
@@ -65,6 +67,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         match cmd {
             "login" => return login(&args[1..]),
             "deepl" => return save_deepl(&args[1..]),
+            "stats" => return stats(&args[1..]),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -105,6 +108,32 @@ fn save_deepl(args: &[String]) -> Result<(), String> {
         return Err(USAGE.into());
     }
     translate::save_key(key)
+}
+
+fn stats(args: &[String]) -> Result<(), String> {
+    let period = match args {
+        [] => spotify::Period::Medium,
+        [name] => spotify::Period::parse(name)
+            .ok_or_else(|| format!("periodo desconocido: {name}\n\n{USAGE}"))?,
+        _ => return Err(USAGE.into()),
+    };
+    let mut client = spotify::Spotify::new(spotify::http_agent())?;
+    let report = client.stats(period)?;
+    println!("{} — {} — {}", report.name, report.country, report.plan);
+    println!("{}", period.label());
+    println!();
+    if report.tracks.is_empty() {
+        println!("Sin canciones en este periodo.");
+        return Ok(());
+    }
+    for (i, track) in report.tracks.iter().enumerate() {
+        if track.artist.is_empty() {
+            println!("{:2}. {}", i + 1, track.title);
+        } else {
+            println!("{:2}. {} — {}", i + 1, track.title, track.artist);
+        }
+    }
+    Ok(())
 }
 
 fn login(args: &[String]) -> Result<(), String> {
