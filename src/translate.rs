@@ -34,12 +34,15 @@ pub struct Lang {
 pub fn parse_lang(name: &str) -> Option<Lang> {
     let code = match name.trim().to_lowercase().as_str() {
         "spanish" | "español" | "es" => "ES",
+        "es-latam" => "ES-419",
         "english" | "en" | "en-us" => "EN-US",
         "en-gb" => "EN-GB",
         "portuguese" | "portugués" | "portugues" | "pt" | "pt-br" => "PT-BR",
         "pt-pt" => "PT-PT",
         "french" | "francés" | "frances" | "fr" => "FR",
+        "fr-ca" => "FR-CA",
         "german" | "alemán" | "aleman" | "de" => "DE",
+        "de-ch" => "DE-CH",
         "italian" | "italiano" | "it" => "IT",
         "japanese" | "japonés" | "japones" | "ja" => "JA",
         "korean" | "coreano" | "ko" => "KO",
@@ -461,9 +464,13 @@ mod tests {
         assert_eq!(parse_lang("spanish").unwrap().code, "ES");
         assert_eq!(parse_lang("Español").unwrap().code, "ES");
         assert_eq!(parse_lang("es").unwrap().code, "ES");
+        assert_eq!(parse_lang("es-latam").unwrap().code, "ES-419");
+        assert_eq!(parse_lang("ES-LATAM").unwrap().code, "ES-419");
         assert_eq!(parse_lang("english").unwrap().code, "EN-US");
         assert_eq!(parse_lang("en-gb").unwrap().code, "EN-GB");
         assert_eq!(parse_lang("pt").unwrap().code, "PT-BR");
+        assert_eq!(parse_lang("fr-ca").unwrap().code, "FR-CA");
+        assert_eq!(parse_lang("de-ch").unwrap().code, "DE-CH");
         assert_eq!(parse_lang("ja").unwrap().code, "JA");
         assert_eq!(parse_lang("ZH-HANT").unwrap().code, "ZH-HANT");
         assert!(parse_lang("klingon").is_none());

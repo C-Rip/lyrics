@@ -43,7 +43,7 @@ Uso:
   lyrics stats [corto|mediano|largo]
                                        top 10, país y plan (por defecto mediano)
 
-Idiomas: es, en, pt, fr, de, it, ja, ko, zh, ru
+Idiomas: es, es-latam, en, en-gb, pt, pt-pt, fr, fr-ca, de, de-ch, it, ja, ko, zh, zh-hant, ru
          (también spanish, español, english, …)
 
 Teclas:
