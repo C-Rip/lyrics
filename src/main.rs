@@ -353,8 +353,8 @@ fn restore() {
     let _ = terminal::disable_raw_mode();
 }
 
-/// En Kitty las barras van en una capa de imagen debajo del texto. En otras
-/// terminales se dibujan como fondo de celda.
+/// Si la terminal responde al protocolo gráfico, las barras van en una capa
+/// de imagen debajo del texto. Si no, se dibujan como fondo de celda.
 fn bar_layer(cols: u16, rows: u16) -> Option<BarLayer> {
     if !kitty::supported() {
         return None;

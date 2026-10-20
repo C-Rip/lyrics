@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::os::fd::FromRawFd;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -18,10 +19,130 @@ const IDS: [u32; 2] = [0x4c59_0001, 0x4c59_0002];
 /// se liberan después de este tiempo.
 const KEEP: Duration = Duration::from_secs(1);
 const MIN_HEIGHT_PX: usize = 2;
+/// Id de la consulta. No coincide con los de las barras.
+const PROBE_ID: u32 = 31;
+const PROBE_WAIT: Duration = Duration::from_millis(200);
 
+/// Hay capas si la terminal carga un píxel por memoria compartida.
+/// El resultado se guarda: al cambiar el tamaño no se vuelve a preguntar.
 pub fn supported() -> bool {
-    std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var("TERM").is_ok_and(|t| t == "xterm-kitty")
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(probe_layers)
+}
+
+fn probe_layers() -> bool {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return false;
+    }
+    let name = format!("/lyrics-probe-{}", std::process::id());
+    let Ok(c_name) = write_shm(&name, &[0, 0, 0, 0]) else {
+        return false;
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
+    let query = format!("\x1b_Gi={PROBE_ID},s=1,v=1,a=q,t=s,f=32;{encoded}\x1b\\\x1b[c");
+    let mut out = io::stdout();
+    let wrote = out.write_all(query.as_bytes()).and_then(|_| out.flush());
+    let buf = if wrote.is_ok() {
+        read_until_attributes(PROBE_WAIT)
+    } else {
+        Vec::new()
+    };
+    unlink_shm(&c_name);
+    graphics_ok(&buf, PROBE_ID)
+}
+
+fn read_until_attributes(timeout: Duration) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if device_attributes(&buf) {
+            break;
+        }
+        let left = timeout.saturating_sub(start.elapsed()).as_millis();
+        if left == 0 {
+            break;
+        }
+        let mut poll = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut poll, 1, left.min(i32::MAX as u128) as i32) };
+        if ready == 0 {
+            break;
+        }
+        if ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if ready < 0 {
+            break;
+        }
+        let mut tmp = [0u8; 256];
+        let n = unsafe { libc::read(libc::STDIN_FILENO, tmp.as_mut_ptr().cast(), tmp.len()) };
+        if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if n < 0 {
+            break;
+        }
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n as usize]);
+    }
+    buf
+}
+
+/// La respuesta gráfica de `id` termina en `OK`. Un error o solo los
+/// atributos del dispositivo dejan las capas apagadas.
+fn graphics_ok(buf: &[u8], id: u32) -> bool {
+    buf.windows(3).enumerate().any(|(at, window)| {
+        if window != [0x1b, b'_', b'G'] {
+            return false;
+        }
+        let control_at = at + 3;
+        let Some(semi) = buf[control_at..].iter().position(|&byte| byte == b';') else {
+            return false;
+        };
+        let control = &buf[control_at..control_at + semi];
+        let payload_at = control_at + semi + 1;
+        let Some(end) = buf[payload_at..]
+            .windows(2)
+            .position(|pair| pair == [0x1b, b'\\'])
+        else {
+            return false;
+        };
+        control_has_id(control, id) && &buf[payload_at..payload_at + end] == b"OK"
+    })
+}
+
+fn control_has_id(control: &[u8], id: u32) -> bool {
+    let want = format!("i={id}");
+    control
+        .split(|&byte| byte == b',')
+        .any(|part| part == want.as_bytes())
+}
+
+/// `ESC [ c` o `ESC [ ? ... c`, el tope de la consulta.
+fn device_attributes(buf: &[u8]) -> bool {
+    let mut rest = buf;
+    while let Some(at) = rest.windows(2).position(|pair| pair == [0x1b, b'[']) {
+        let mut cursor = at + 2;
+        if rest.get(cursor) == Some(&b'?') {
+            cursor += 1;
+        }
+        while rest
+            .get(cursor)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b';')
+        {
+            cursor += 1;
+        }
+        if rest.get(cursor) == Some(&b'c') {
+            return true;
+        }
+        rest = &rest[at + 1..];
+    }
+    false
 }
 
 /// Capa de barras en píxeles debajo del texto (protocolo gráfico de Kitty, z=-1).
@@ -144,35 +265,45 @@ impl BarLayer {
             .is_some_and(|(t, _)| t.elapsed() > KEEP)
         {
             let (_, name) = self.pending.pop_front().unwrap();
-            unsafe { libc::shm_unlink(name.as_ptr()) };
+            unlink_shm(&name);
         }
         self.seq += 1;
         let name = format!("/lyrics-{}-{}", std::process::id(), self.seq);
-        let c_name = CString::new(name.clone()).expect("nombre sin NUL");
-        let fd = unsafe {
-            libc::shm_open(
-                c_name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut file = unsafe { File::from_raw_fd(fd) };
-        if let Err(e) = file.write_all(&self.pixels) {
-            unsafe { libc::shm_unlink(c_name.as_ptr()) };
-            return Err(e);
-        }
+        let c_name = write_shm(&name, &self.pixels)?;
         self.pending.push_back((Instant::now(), c_name));
         Ok(name)
     }
 }
 
+fn write_shm(name: &str, bytes: &[u8]) -> io::Result<CString> {
+    let c_name =
+        CString::new(name).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    let fd = unsafe {
+        libc::shm_open(
+            c_name.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    if let Err(err) = file.write_all(bytes) {
+        unlink_shm(&c_name);
+        return Err(err);
+    }
+    Ok(c_name)
+}
+
+fn unlink_shm(name: &CString) {
+    unsafe { libc::shm_unlink(name.as_ptr()) };
+}
+
 impl Drop for BarLayer {
     fn drop(&mut self) {
         for (_, name) in self.pending.drain(..) {
-            unsafe { libc::shm_unlink(name.as_ptr()) };
+            unlink_shm(&name);
         }
     }
 }
@@ -205,5 +336,27 @@ mod tests {
         out.clear();
         layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3));
         assert!(!layer.emit(&mut out).unwrap());
+    }
+
+    #[test]
+    fn graphics_ok_enables_layers() {
+        assert!(graphics_ok(b"\x1b_Gi=31;OK\x1b\\", 31));
+        assert!(graphics_ok(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22c", 31));
+    }
+
+    #[test]
+    fn graphics_error_disables_layers() {
+        assert!(!graphics_ok(
+            b"\x1b_Gi=31;EBADF:Failed to read image file\x1b\\",
+            31
+        ));
+    }
+
+    #[test]
+    fn device_attributes_without_graphics_disable_layers() {
+        assert!(!graphics_ok(b"\x1b[?62;22c", 31));
+        assert!(!graphics_ok(b"\x1b[c", 31));
+        assert!(device_attributes(b"\x1b[?62;22c"));
+        assert!(device_attributes(b"\x1b[c"));
     }
 }
