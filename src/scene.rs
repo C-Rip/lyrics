@@ -197,6 +197,21 @@ impl LyricsPane {
     }
 }
 
+/// Sin letra: el título limpio en el centro y, debajo, la app que suena.
+fn missing(track: &crate::spotify::Track, cols: usize, rows: usize) -> Rows {
+    let title = if track.artist.is_empty() {
+        track.title.clone()
+    } else {
+        format!("{} - {}", track.artist, track.title)
+    };
+    let lines = if track.source.is_empty() {
+        vec![title]
+    } else {
+        vec![title, track.source.clone()]
+    };
+    layout(&lines, 0, Some(0), cols, rows)
+}
+
 fn build(view: &View, index: usize, scroll: isize, cols: usize, rows: usize) -> Rows {
     let Some(track) = &view.track else {
         let message = view.message.clone().unwrap_or_default();
@@ -212,7 +227,7 @@ fn build(view: &View, index: usize, scroll: isize, cols: usize, rows: usize) -> 
         Lyrics::Plain(lines) => layout_from_top(lines, scroll.max(0) as usize, cols, rows),
         Lyrics::Loading => note("buscando letra"),
         Lyrics::Instrumental => note("instrumental"),
-        Lyrics::NotFound => note("sin letra disponible"),
+        Lyrics::NotFound => missing(track, cols, rows),
         Lyrics::Retrying(_) => note("lrclib saturado, reintentando"),
         Lyrics::Failed(e) => note(e),
     }
@@ -380,6 +395,41 @@ mod tests {
         resumed.playing = true;
         pane.draw(&mut frame, &resumed);
         assert_eq!(pane.scroll, 0);
+    }
+
+    #[test]
+    fn missing_lyrics_center_the_title_and_the_app() {
+        let mut frame = Frame::new(40, 11);
+        let mut pane = LyricsPane::new();
+        let title = "Artista - Canción";
+        let source = "YouTube | Chrome";
+        pane.draw(
+            &mut frame,
+            &View {
+                track: Some(std::sync::Arc::new(crate::spotify::Track {
+                    id: "yt:abc".into(),
+                    title: "Canción".into(),
+                    artist: "Artista".into(),
+                    main_artist: "Artista".into(),
+                    duration_ms: 1_000,
+                    source: source.into(),
+                })),
+                lyrics: std::sync::Arc::new(Lyrics::NotFound),
+                position_ms: 0,
+                playing: true,
+                message: None,
+                notice: None,
+            },
+        );
+        let mut out = String::new();
+        let mut screen = crate::render::Screen::new();
+        screen.draw(&frame, &mut out);
+        let title_col = (40 - text_width(title)) / 2 + 1;
+        let source_col = (40 - text_width(source)) / 2 + 1;
+        assert!(out.contains(&format!("\x1b[6;{title_col}H")), "{out}");
+        assert!(out.contains(title));
+        assert!(out.contains(&format!("\x1b[7;{source_col}H")), "{out}");
+        assert!(out.contains(source));
     }
 
     #[test]

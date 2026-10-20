@@ -36,6 +36,9 @@ struct Record {
     plain: Option<String>,
     #[serde(default)]
     instrumental: bool,
+    /// LRCLIB manda segundos con decimales. `u64` directo fallaría al deserializar.
+    #[serde(default)]
+    duration: f64,
 }
 
 /// Busca en la caché local y si no está, en lrclib.
@@ -104,7 +107,8 @@ fn store(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn lookup(agent: &ureq::Agent, track: &Track) -> Result<Option<Record>, LookupError> {
-    let duration = (track.duration_ms / 1000).to_string();
+    let video_secs = track.duration_ms / 1000;
+    let duration = video_secs.to_string();
     let exact = agent
         .get(GET_URL)
         .query("track_name", &track.title)
@@ -122,19 +126,160 @@ fn lookup(agent: &ureq::Agent, track: &Track) -> Result<Option<Record>, LookupEr
         Err(e) => return Err(classify(e)),
     }
 
-    let mut results: Vec<Record> = agent
-        .get(SEARCH_URL)
-        .query("track_name", &track.title)
-        .query("artist_name", &track.main_artist)
+    let results = search(agent, Some((&track.title, &track.main_artist)), None)?;
+    if !results.is_empty() {
+        return Ok(best_match(results, video_secs));
+    }
+    let q = format!("{} {}", track.main_artist, track.title);
+    let q = q.trim();
+    if q.is_empty() {
+        return Ok(None);
+    }
+    let results = search(agent, None, Some(q))?;
+    Ok(best_match(results, video_secs))
+}
+
+fn search(
+    agent: &ureq::Agent,
+    fields: Option<(&str, &str)>,
+    q: Option<&str>,
+) -> Result<Vec<Record>, LookupError> {
+    let mut request = agent.get(SEARCH_URL);
+    if let Some((title, artist)) = fields {
+        request = request
+            .query("track_name", title)
+            .query("artist_name", artist);
+    }
+    if let Some(q) = q {
+        request = request.query("q", q);
+    }
+    request
         .call()
         .map_err(classify)?
         .into_json()
-        .map_err(|e| LookupError::Fatal(format!("lrclib: {e}")))?;
-    let best = results
+        .map_err(|e| LookupError::Fatal(format!("lrclib: {e}")))
+}
+
+/// Margen en el que una letra sincronizada sigue valiendo para el video.
+const SYNC_MARGIN_SECS: u64 = 8;
+
+/// Elige la letra sincronizada más cercana a la duración del video.
+/// Si todas quedan más lejos de [`SYNC_MARGIN_SECS`], devuelve texto plano.
+fn best_match(mut records: Vec<Record>, video_secs: u64) -> Option<Record> {
+    if records.is_empty() {
+        return None;
+    }
+    if video_secs == 0 {
+        if let Some(index) = records.iter().position(has_synced) {
+            return Some(records.swap_remove(index));
+        }
+        if let Some(index) = records.iter().position(has_plain) {
+            return Some(records.swap_remove(index));
+        }
+        return records.into_iter().find(|record| record.instrumental);
+    }
+
+    if let Some(index) = closest(
+        records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| has_synced(record)),
+        video_secs,
+    ) && duration_diff(&records[index], video_secs) <= SYNC_MARGIN_SECS
+    {
+        return Some(records.swap_remove(index));
+    }
+
+    let nearest = closest(records.iter().enumerate(), video_secs).unwrap();
+    let nearest_diff = duration_diff(&records[nearest], video_secs);
+    let lyric_closer = records
         .iter()
-        .position(|r| r.synced.as_deref().is_some_and(|s| !s.is_empty()))
-        .unwrap_or(0);
-    Ok((best < results.len()).then(|| results.swap_remove(best)))
+        .any(|record| has_lyrics(record) && duration_diff(record, video_secs) < nearest_diff);
+    if records[nearest].instrumental && !has_lyrics(&records[nearest]) && !lyric_closer {
+        return Some(records.swap_remove(nearest));
+    }
+
+    let lyrics: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| has_lyrics(record))
+        .map(|(index, _)| index)
+        .collect();
+    if lyrics.is_empty() {
+        return None;
+    }
+    let within: Vec<usize> = lyrics
+        .iter()
+        .copied()
+        .filter(|&index| duration_diff(&records[index], video_secs) <= SYNC_MARGIN_SECS)
+        .collect();
+    if !within.is_empty() {
+        let index = closest(
+            within.iter().map(|&index| (index, &records[index])),
+            video_secs,
+        )
+        .unwrap();
+        return Some(records.swap_remove(index));
+    }
+    let index = closest(
+        lyrics.iter().map(|&index| (index, &records[index])),
+        video_secs,
+    )
+    .unwrap();
+    Some(force_plain(records.swap_remove(index)))
+}
+
+fn closest<'a, I>(records: I, video_secs: u64) -> Option<usize>
+where
+    I: Iterator<Item = (usize, &'a Record)>,
+{
+    records
+        .min_by_key(|(index, record)| (duration_diff(record, video_secs), *index))
+        .map(|(index, _)| index)
+}
+
+fn duration_diff(record: &Record, video_secs: u64) -> u64 {
+    let secs = record.duration.round() as u64;
+    secs.abs_diff(video_secs)
+}
+
+fn has_synced(record: &Record) -> bool {
+    record
+        .synced
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn has_plain(record: &Record) -> bool {
+    record
+        .plain
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn has_lyrics(record: &Record) -> bool {
+    has_synced(record) || has_plain(record)
+}
+
+/// `from_record` prefiere la sincronía. Aquí se apaga para no mostrar una letra desfasada.
+fn force_plain(mut record: Record) -> Record {
+    let plain_empty = record
+        .plain
+        .as_deref()
+        .is_none_or(|text| text.trim().is_empty());
+    if plain_empty && let Some(synced) = record.synced.as_deref() {
+        let text = strip_timestamps(synced);
+        if !text.trim().is_empty() {
+            record.plain = Some(text);
+        }
+    }
+    record.synced = None;
+    record
+}
+
+fn strip_timestamps(synced: &str) -> String {
+    let (_times, lines) = parse_lrc(synced);
+    lines.join("\n")
 }
 
 fn classify(err: ureq::Error) -> LookupError {
@@ -255,5 +400,89 @@ mod tests {
         for code in [400, 401] {
             assert!(!transient_status(code), "{code}");
         }
+    }
+
+    fn sample(
+        duration: f64,
+        synced: Option<&str>,
+        plain: Option<&str>,
+        instrumental: bool,
+    ) -> Record {
+        Record {
+            duration,
+            synced: synced.map(str::to_string),
+            plain: plain.map(str::to_string),
+            instrumental,
+        }
+    }
+
+    #[test]
+    fn duration_accepts_decimals() {
+        let record: Record = serde_json::from_str(r#"{"duration": 259.4}"#).unwrap();
+        assert_eq!(record.duration.round() as u64, 259);
+    }
+
+    #[test]
+    fn synced_within_eight_seconds_wins() {
+        let records = vec![
+            sample(400.0, Some("[00:01.00]lejos"), None, false),
+            sample(259.4, Some("[00:01.00]cerca"), None, false),
+        ];
+        let best = best_match(records, 259).unwrap();
+        assert_eq!(best.synced.as_deref(), Some("[00:01.00]cerca"));
+    }
+
+    #[test]
+    fn beyond_eight_seconds_becomes_plain_text() {
+        let records = vec![sample(
+            100.0,
+            Some("[00:01.00]hola\n[00:02.00]mundo"),
+            None,
+            false,
+        )];
+        let best = best_match(records, 120).unwrap();
+        assert!(best.synced.is_none());
+        let Lyrics::Plain(lines) = from_record(best) else {
+            panic!("se esperaba texto plano");
+        };
+        assert_eq!(lines, ["hola", "mundo"]);
+    }
+
+    #[test]
+    fn far_sync_keeps_an_existing_plain_lyric() {
+        let records = vec![sample(100.0, Some("[00:01.00]sync"), Some("plana"), false)];
+        let best = best_match(records, 120).unwrap();
+        assert!(best.synced.is_none());
+        let Lyrics::Plain(lines) = from_record(best) else {
+            panic!("se esperaba texto plano");
+        };
+        assert_eq!(lines, ["plana"]);
+    }
+
+    #[test]
+    fn eight_seconds_keeps_the_sync() {
+        let records = vec![sample(108.0, Some("[00:01.00]hola"), Some("ya"), false)];
+        let best = best_match(records, 100).unwrap();
+        assert!(best.synced.is_some());
+    }
+
+    #[test]
+    fn closer_instrumental_beats_a_far_lyric() {
+        let records = vec![
+            sample(200.0, Some("[00:01.00]lejos"), None, false),
+            sample(101.0, None, None, true),
+        ];
+        let best = best_match(records, 100).unwrap();
+        assert!(matches!(from_record(best), Lyrics::Instrumental));
+    }
+
+    #[test]
+    fn unknown_duration_takes_the_first_synced_line() {
+        let records = vec![
+            sample(10.0, None, Some("plana"), false),
+            sample(20.0, Some("[00:01.00]sync"), None, false),
+        ];
+        let best = best_match(records, 0).unwrap();
+        assert_eq!(best.synced.as_deref(), Some("[00:01.00]sync"));
     }
 }

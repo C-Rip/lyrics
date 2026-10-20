@@ -2,6 +2,7 @@ mod audio;
 mod kitty;
 mod lyr;
 mod lyrics;
+mod mpris;
 mod player;
 mod render;
 mod scene;
@@ -34,9 +35,10 @@ const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
 const USAGE: &str = "\
 Uso:
-  lyrics                               letras de Spotify con el espectro de audio detrás
+  lyrics                               letras del reproductor local, con el espectro detrás
+  lyrics --api                         fuerza la API web de Spotify
   lyrics --demo                        audio y letra de prueba
-  lyrics --translate <idioma>          traduce la letra (vale junto con --demo)
+  lyrics --translate <idioma>          traduce la letra (vale con --api y con --demo)
   lyrics login <client_id> <secret> [puerto]
                                        inicia sesión en Spotify (puerto por defecto 8888)
   lyrics deepl <clave>                 guarda la clave de DeepL
@@ -76,11 +78,13 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         }
     }
     let mut demo = false;
+    let mut api = false;
     let mut lang = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--demo" => demo = true,
+            "--api" => api = true,
             "--translate" => {
                 let name = rest
                     .next()
@@ -97,7 +101,10 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             other => return Err(format!("argumento desconocido: {other}\n\n{USAGE}")),
         }
     }
-    run(demo, lang)
+    if demo && api {
+        return Err(format!("--api no vale con --demo\n\n{USAGE}"));
+    }
+    run(demo, api, lang)
 }
 
 fn save_deepl(args: &[String]) -> Result<(), String> {
@@ -163,10 +170,15 @@ enum Source {
 }
 
 impl Source {
-    fn live(lang: Option<translate::Lang>) -> Self {
+    fn live(api: bool, lang: Option<translate::Lang>) -> Self {
+        let backend: Box<dyn player::PlayerBackend> = if api {
+            Box::new(player::SpotifyApiBackend::new())
+        } else {
+            Box::new(mpris::MprisBackend::new())
+        };
         Source::Live {
             audio: AudioTap::start(),
-            player: Player::start(lang),
+            player: Player::start(backend, lang),
         }
     }
 
@@ -206,6 +218,7 @@ impl Source {
                 artist: "lyrics".into(),
                 main_artist: "lyrics".into(),
                 duration_ms: 28_000,
+                source: "demo".into(),
             }),
         })
     }
@@ -294,14 +307,14 @@ impl Source {
     }
 }
 
-fn run(demo: bool, lang: Option<translate::Lang>) -> Result<(), String> {
+fn run(demo: bool, api: bool, lang: Option<translate::Lang>) -> Result<(), String> {
     if lang.is_some() {
         translate::api_key()?;
     }
     let mut source = if demo {
         Source::demo(lang)?
     } else {
-        Source::live(lang)
+        Source::live(api, lang)
     };
 
     let mut stdout = io::stdout();

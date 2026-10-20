@@ -153,12 +153,16 @@ pub struct Track {
     pub artist: String,
     pub main_artist: String,
     pub duration_ms: u64,
+    /// App que está sonando, por ejemplo `Spotify` o `YouTube | Chrome`.
+    pub source: String,
 }
 
 pub struct Now {
     pub track: Arc<Track>,
     pub progress_ms: u64,
     pub playing: bool,
+    /// 1.0 en Spotify. En MPRIS es la propiedad `Rate`.
+    pub rate: f64,
 }
 
 /// Periodo de las canciones más escuchadas.
@@ -394,9 +398,11 @@ fn into_now(playing: Playing) -> Option<Now> {
             artist,
             main_artist,
             duration_ms: item.duration_ms,
+            source: "Spotify".into(),
         }),
         progress_ms: playing.progress_ms.unwrap_or(0),
         playing: playing.is_playing,
+        rate: 1.0,
     })
 }
 
