@@ -22,7 +22,7 @@ use kitty::BarLayer;
 use lyrics::Lyrics;
 use player::{Player, View};
 use render::{Frame, Screen};
-use scene::{LyricsPane, THEME, bar_layout, draw_bars};
+use scene::{LyricsPane, THEME, bar_layout, draw_bars, window_title};
 use spectrum::Analyzer;
 use spotify::Track;
 
@@ -32,6 +32,9 @@ const IDLE_FRAME: Duration = Duration::from_millis(100);
 const IDLE_AFTER: u32 = 30;
 const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+/// Guarda el título de la ventana (la pestaña, en Kitty) y lo recupera al salir.
+const TITLE_PUSH: &str = "\x1b[22;2t";
+const TITLE_POP: &str = "\x1b[23;2t";
 
 const USAGE: &str = "\
 Uso:
@@ -327,7 +330,8 @@ fn run(demo: bool, api: bool, lang: Option<translate::Lang>) -> Result<(), Strin
     )
     .map_err(|e| e.to_string())?;
     // Solo clics y rueda (sin seguimiento de movimiento), en formato SGR.
-    let _ = write!(stdout, "{MOUSE_ON}");
+    // El título se apila para devolver el de la shell al salir.
+    let _ = write!(stdout, "{MOUSE_ON}{TITLE_PUSH}");
     let _ = stdout.flush();
 
     let previous_hook = std::panic::take_hook();
@@ -341,9 +345,22 @@ fn run(demo: bool, api: bool, lang: Option<translate::Lang>) -> Result<(), Strin
     result
 }
 
+/// OSC 2: el título de la ventana. En Kitty la pestaña usa ese texto.
+fn set_tab_title(shown: &mut String, view: &View, out: &mut String) -> bool {
+    let next = window_title(view);
+    if next == *shown {
+        return false;
+    }
+    shown.clone_from(&next);
+    out.push_str("\x1b]2;");
+    out.push_str(&next);
+    out.push_str("\x1b\\");
+    true
+}
+
 fn restore() {
     let mut stdout = io::stdout();
-    let _ = write!(stdout, "\x1b[0m{MOUSE_OFF}");
+    let _ = write!(stdout, "\x1b[0m{MOUSE_OFF}{TITLE_POP}");
     let _ = execute!(
         stdout,
         terminal::EnableLineWrap,
@@ -377,6 +394,7 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
     let mut analyzer = Analyzer::new();
     let mut samples = vec![0.0f32; WINDOW];
     let mut out = String::with_capacity(64 * 1024);
+    let mut tab = String::new();
 
     let mut last = Instant::now();
     let mut next = last;
@@ -448,16 +466,19 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
         source.samples(&mut samples);
         let values = analyzer.process(&samples, dt);
 
+        let view = source.view();
         frame.clear();
         if frame.height > 0 {
             match &mut layer {
                 Some(layer) => layer.update(&layout, values, THEME.bar),
                 None => draw_bars(&mut frame, &layout, values),
             }
-            pane.draw(&mut frame, &source.view());
+            pane.draw(&mut frame, &view);
         }
 
         out.clear();
+        let title_changed = set_tab_title(&mut tab, &view, &mut out);
+        let frame_at = out.len();
         out.push_str("\x1b[?2026h");
         // El texto va primero: un redibujado completo borra la pantalla y,
         // con ella, la imagen de barras, que entonces se vuelve a colocar.
@@ -467,11 +488,14 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
         }
         if wrote {
             out.push_str("\x1b[0m\x1b[?2026l");
-            stdout.write_all(out.as_bytes())?;
-            stdout.flush()?;
             idle_frames = 0;
         } else {
+            out.truncate(frame_at);
             idle_frames = idle_frames.saturating_add(1);
+        }
+        if wrote || title_changed {
+            stdout.write_all(out.as_bytes())?;
+            stdout.flush()?;
         }
         let step = if idle_frames > IDLE_AFTER {
             IDLE_FRAME

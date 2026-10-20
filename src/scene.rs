@@ -197,6 +197,22 @@ impl LyricsPane {
     }
 }
 
+/// Título de la ventana: artista y canción, o el aviso si no hay pista.
+/// Kitty lo muestra en la pestaña. Los controles se quitan para no cortar la secuencia.
+pub fn window_title(view: &View) -> String {
+    let raw = match &view.track {
+        Some(track) if track.artist.is_empty() => track.title.clone(),
+        Some(track) => format!("{} - {}", track.artist, track.title),
+        None => view.message.clone().unwrap_or_default(),
+    };
+    let clean: String = raw.chars().filter(|c| !c.is_control()).collect();
+    if clean.is_empty() {
+        "lyrics".into()
+    } else {
+        clean
+    }
+}
+
 /// Sin letra: el título limpio en el centro y, debajo, la app que suena.
 fn missing(track: &crate::spotify::Track, cols: usize, rows: usize) -> Rows {
     let title = if track.artist.is_empty() {
@@ -430,6 +446,31 @@ mod tests {
         assert!(out.contains(title));
         assert!(out.contains(&format!("\x1b[7;{source_col}H")), "{out}");
         assert!(out.contains(source));
+    }
+
+    fn titled(artist: &str, title: &str) -> View {
+        let mut sample = view(true, 0);
+        sample.track = Some(std::sync::Arc::new(crate::spotify::Track {
+            id: "1".into(),
+            title: title.into(),
+            artist: artist.into(),
+            main_artist: artist.into(),
+            duration_ms: 1_000,
+            source: String::new(),
+        }));
+        sample
+    }
+
+    #[test]
+    fn window_title_names_the_song_and_drops_controls() {
+        assert_eq!(window_title(&titled("Artista", "Canción\u{1b}")), "Artista - Canción");
+        assert_eq!(window_title(&titled("", "Solo")), "Solo");
+
+        let mut waiting = view(false, 0);
+        waiting.message = Some("Buscando reproductor".into());
+        assert_eq!(window_title(&waiting), "Buscando reproductor");
+        waiting.message = None;
+        assert_eq!(window_title(&waiting), "lyrics");
     }
 
     #[test]

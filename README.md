@@ -111,6 +111,8 @@ Las barras suben con una constante de unos 25 ms y caen con gravedad. La sensibi
 
 ### Pantalla
 
+El título de la ventana lleva el artista y la canción (`Artista - Canción`). En Kitty eso es el texto de la pestaña, así que sigue visible cuando la letra ocupa la pantalla. Sin pista, la pestaña muestra el aviso del centro (`Buscando reproductor`, `Nada sonando`, …). Al salir se restaura el título que había.
+
 La línea que suena queda en el centro vertical, en cian y negrita. Las anteriores van en blanco tenue y las siguientes en un azul apagado. Las barras usan el tono `86, 95, 137`. Una línea sincronizada vacía, cuando es la que suena, se muestra como ♪. El texto se parte por palabras y, si una palabra no cabe, por caracteres.
 
 En una letra sincronizada el desplazamiento solo se queda en pausa: al reanudar vuelve a la línea que suena. En texto plano se recorre desde arriba y el desplazamiento se mantiene aunque siga sonando. Al cambiar de letra el desplazamiento vuelve a cero.
