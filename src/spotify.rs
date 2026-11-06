@@ -14,7 +14,7 @@ const PLAYING_URL: &str = "https://api.spotify.com/v1/me/player/currently-playin
 const PROFILE_URL: &str = "https://api.spotify.com/v1/me";
 const TOP_TRACKS_URL: &str = "https://api.spotify.com/v1/me/top/tracks";
 const SCOPES: &str =
-    "user-read-currently-playing user-read-playback-state user-top-read user-read-private";
+    "user-read-currently-playing user-read-playback-state user-top-read user-read-private user-library-read user-library-modify";
 const USER_AGENT: &str = concat!(
     "lyrics/",
     env!("CARGO_PKG_VERSION"),
@@ -155,6 +155,7 @@ pub struct Track {
     pub duration_ms: u64,
     /// App que está sonando, por ejemplo `Spotify` o `YouTube | Chrome`.
     pub source: String,
+    pub spotify_id: Option<String>,
 }
 
 pub struct Now {
@@ -316,6 +317,50 @@ impl Spotify {
         })
     }
 
+    pub fn is_saved(&mut self, track_id: &str) -> Result<bool, String> {
+        let uri = format!("spotify:track:{track_id}");
+        let url = format!("https://api.spotify.com/v1/me/library/contains?uris={uri}");
+        let saved: Vec<bool> = self.get_json(&url)?;
+        Ok(saved.first().copied().unwrap_or(false))
+    }
+
+    pub fn save_track(&mut self, track_id: &str) -> Result<(), String> {
+        let uri = format!("spotify:track:{track_id}");
+        let url = format!("https://api.spotify.com/v1/me/library?uris={uri}");
+        self.send_empty("PUT", &url)
+    }
+
+    pub fn remove_track(&mut self, track_id: &str) -> Result<(), String> {
+        let uri = format!("spotify:track:{track_id}");
+        let url = format!("https://api.spotify.com/v1/me/library?uris={uri}");
+        self.send_empty("DELETE", &url)
+    }
+
+    fn send_empty(&mut self, method: &str, url: &str) -> Result<(), String> {
+        for attempt in 0..2 {
+            let token = self.token()?;
+            let req = match method {
+                "PUT" => self.agent.put(url),
+                "DELETE" => self.agent.delete(url),
+                _ => return Err("método no soportado".into()),
+            };
+            let response = req
+                .set("Authorization", &format!("Bearer {token}"))
+                .set("Content-Length", "0")
+                .call();
+            match response {
+                Ok(_) => return Ok(()),
+                Err(ureq::Error::Status(401, _)) if attempt == 0 => self.auth.expires_at = 0,
+                Err(ureq::Error::Status(403, _)) => return Err(library_scope()),
+                Err(ureq::Error::Status(429, _)) => {
+                    return Err("Spotify limitó las peticiones, reintentando".into());
+                }
+                Err(e) => return Err(format!("Spotify: {e}")),
+            }
+        }
+        Err("Spotify rechazó la sesión. Ejecuta: lyrics login".into())
+    }
+
     fn get_json<T: for<'de> Deserialize<'de>>(&mut self, url: &str) -> Result<T, String> {
         for attempt in 0..2 {
             let token = self.token()?;
@@ -342,6 +387,10 @@ impl Spotify {
 
 fn stats_scope() -> String {
     "Faltan permisos de estadísticas. Vuelve a ejecutar: lyrics login".into()
+}
+
+fn library_scope() -> String {
+    "Faltan permisos de biblioteca (Me gusta). Vuelve a ejecutar: lyrics login".into()
 }
 
 fn plan_label(product: &str) -> String {
@@ -388,6 +437,7 @@ fn into_now(playing: Playing) -> Option<Now> {
         .first()
         .map(|s| s.to_string())
         .unwrap_or_else(|| artist.clone());
+    let spotify_id = item.id.clone();
     let id = item
         .id
         .unwrap_or_else(|| format!("local-{artist}-{}", item.name));
@@ -399,6 +449,7 @@ fn into_now(playing: Playing) -> Option<Now> {
             main_artist,
             duration_ms: item.duration_ms,
             source: "Spotify".into(),
+            spotify_id,
         }),
         progress_ms: playing.progress_ms.unwrap_or(0),
         playing: playing.is_playing,

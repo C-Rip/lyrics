@@ -453,6 +453,7 @@ fn read_player(conn: &Connection, bus_name: &str) -> Option<PlayerSnap> {
         .map(value_strings)
         .unwrap_or_default();
     let url = metadata.get("xesam:url").and_then(value_string);
+    let track_id = metadata.get("mpris:trackid").and_then(value_string_or_path);
     let duration_ms = metadata
         .get("mpris:length")
         .and_then(value_i64)
@@ -460,6 +461,7 @@ fn read_player(conn: &Connection, bus_name: &str) -> Option<PlayerSnap> {
         .unwrap_or(0);
     let source = source_label(&identity, bus_name, url.as_deref(), &raw_title);
     let (title, artist, main_artist) = clean_track(bus_name, &raw_title, &artists);
+    let spotify_id = extract_spotify_id(url.as_deref(), track_id.as_deref());
     Some(PlayerSnap {
         status,
         now: Now {
@@ -470,6 +472,7 @@ fn read_player(conn: &Connection, bus_name: &str) -> Option<PlayerSnap> {
                 main_artist,
                 duration_ms,
                 source,
+                spotify_id,
             }),
             progress_ms: us_to_ms(position),
             playing: status == Playback::Playing,
@@ -500,6 +503,43 @@ fn relevant_property(name: &str) -> bool {
 
 fn value_string(value: &OwnedValue) -> Option<String> {
     String::try_from(value.try_clone().ok()?).ok()
+}
+
+fn value_string_or_path(value: &OwnedValue) -> Option<String> {
+    if let Some(s) = value_string(value) {
+        return Some(s);
+    }
+    let owned = value.try_clone().ok()?;
+    zbus::zvariant::ObjectPath::try_from(owned).ok().map(|p| p.to_string())
+}
+
+fn extract_spotify_id(url: Option<&str>, track_id: Option<&str>) -> Option<String> {
+    if let Some(url) = url {
+        if let Some(pos) = url.find("open.spotify.com/track/") {
+            let rest = &url[pos + "open.spotify.com/track/".len()..];
+            let id = rest.split(['?', '/', '#']).next().unwrap_or(rest);
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    if let Some(tid) = track_id {
+        if let Some(pos) = tid.find("spotify:track:") {
+            let id = &tid[pos + "spotify:track:".len()..];
+            let id = id.split(['?', '/', '#']).next().unwrap_or(id);
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+        if let Some(pos) = tid.find("/track/") {
+            let id = &tid[pos + "/track/".len()..];
+            let id = id.split(['?', '/', '#']).next().unwrap_or(id);
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn value_i64(value: &OwnedValue) -> Option<i64> {

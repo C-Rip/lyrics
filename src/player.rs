@@ -27,6 +27,7 @@ pub struct View {
     pub playing: bool,
     pub message: Option<String>,
     pub notice: Option<String>,
+    pub liked: Option<bool>,
 }
 
 pub(crate) struct State {
@@ -42,6 +43,8 @@ pub(crate) struct State {
     translate: bool,
     message: Option<String>,
     pub(crate) notice: Option<String>,
+    pub(crate) liked: Option<bool>,
+    pub(crate) liking: bool,
 }
 
 /// Foto de la reproducción. `now` vacío significa que no hay nada sonando.
@@ -133,12 +136,14 @@ impl Player {
             translate: lang.is_some(),
             message: Some(backend.startup_message().into()),
             notice: None,
+            liked: None,
+            liking: false,
         }));
         let shared = Arc::clone(&state);
         let jobs = lang.map(|lang| translate::spawn(lang, Arc::clone(&state)));
         thread::Builder::new()
             .name("player".into())
-            .spawn(move || run(&shared, lang, jobs, backend))
+            .spawn(move || run(shared, lang, jobs, backend))
             .expect("no se pudo crear el hilo del reproductor");
         Self { state }
     }
@@ -161,7 +166,53 @@ impl Player {
             playing: state.now.as_ref().is_some_and(|now| now.playing),
             message: state.message.clone(),
             notice: state.notice.clone(),
+            liked: state.liked,
         }
+    }
+
+    /// Guarda o elimina la canción de las canciones que te gustan de Spotify.
+    pub fn toggle_like(&self) {
+        let (spotify_id, current_liked, target_liked) = {
+            let mut state = self.state.lock().unwrap();
+            if state.liking {
+                return;
+            }
+            let Some(now) = state.now.as_ref() else { return };
+            let Some(spotify_id) = now.track.spotify_id.clone() else {
+                state.notice = Some("Esta canción no es de Spotify".into());
+                return;
+            };
+            let current = state.liked;
+            let target = !current.unwrap_or(false);
+            state.liking = true;
+            state.liked = Some(target);
+            if target {
+                state.notice = Some("Guardada en tus Me gusta".into());
+            } else {
+                state.notice = Some("Eliminada de tus Me gusta".into());
+            }
+            (spotify_id, current, target)
+        };
+
+        let shared = Arc::clone(&self.state);
+        thread::Builder::new()
+            .name("spotify-like".into())
+            .spawn(move || {
+                let res = spotify::Spotify::new(spotify::http_agent()).and_then(|mut client| {
+                    if target_liked {
+                        client.save_track(&spotify_id)
+                    } else {
+                        client.remove_track(&spotify_id)
+                    }
+                });
+                let mut s = shared.lock().unwrap();
+                s.liking = false;
+                if let Err(e) = res {
+                    s.liked = current_liked;
+                    s.notice = Some(e);
+                }
+            })
+            .ok();
     }
 
     /// Vuelve a la letra original o a la traducción. No hace nada sin `--translate`.
@@ -174,7 +225,7 @@ impl Player {
 }
 
 fn run(
-    state: &Mutex<State>,
+    state: Arc<Mutex<State>>,
     lang: Option<Lang>,
     jobs: Option<std::sync::mpsc::Sender<Job>>,
     mut backend: Box<dyn PlayerBackend>,
@@ -238,6 +289,25 @@ fn run(
                 s.original = Arc::new(Lyrics::Loading);
                 s.translated = None;
                 s.notice = None;
+                s.liked = if track.spotify_id.is_some() { Some(false) } else { None };
+            }
+        }
+        if changed {
+            if let Some(sid) = track.spotify_id.clone() {
+                let shared = Arc::clone(&state);
+                thread::Builder::new()
+                    .name("spotify-check-saved".into())
+                    .spawn(move || {
+                        if let Ok(mut client) = spotify::Spotify::new(spotify::http_agent()) {
+                            if let Ok(saved) = client.is_saved(&sid) {
+                                let mut s = shared.lock().unwrap();
+                                if s.now.as_ref().and_then(|n| n.track.spotify_id.as_ref()) == Some(&sid) {
+                                    s.liked = Some(saved);
+                                }
+                            }
+                        }
+                    })
+                    .ok();
             }
         }
         let due = retry.as_ref().is_some_and(|(at, _)| sampled >= *at);

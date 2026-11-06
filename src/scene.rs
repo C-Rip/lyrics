@@ -9,6 +9,8 @@ pub struct Style {
 
 pub struct Theme {
     pub bar: Rgb,
+    /// Color del relleno del corazón cuando está en Me gusta (ej. azul LibreSprite o barra)
+    pub heart: Rgb,
     pub before: Style,
     pub current: Style,
     pub after: Style,
@@ -17,6 +19,7 @@ pub struct Theme {
 /// Colores de tu config de sptlrx y barras en el tono de cava detrás de la letra.
 pub const THEME: Theme = Theme {
     bar: Rgb(86, 95, 137),
+    heart: Rgb(255, 30, 60),
     before: Style {
         fg: Rgb(255, 255, 255),
         attr: FAINT,

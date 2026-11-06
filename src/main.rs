@@ -57,7 +57,8 @@ Teclas:
   RePág/AvPág          media pantalla
   Inicio               volver a la línea que suena
   espacio              pausa (solo en --demo)
-  t                    original o traducción (con --translate)";
+  t                    original o traducción (con --translate)
+  l, clic en corazón   guardar o quitar de Me gusta en Spotify";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -169,6 +170,7 @@ enum Source {
         translated: Option<Arc<Lyrics>>,
         show_translation: bool,
         track: Arc<Track>,
+        liked: bool,
     },
 }
 
@@ -222,7 +224,9 @@ impl Source {
                 main_artist: "lyrics".into(),
                 duration_ms: 28_000,
                 source: "demo".into(),
+                spotify_id: None,
             }),
+            liked: false,
         })
     }
 
@@ -236,6 +240,13 @@ impl Source {
                 Some(at) => *started += at.elapsed(),
                 None => *paused_at = Some(Instant::now()),
             }
+        }
+    }
+
+    fn toggle_like(&mut self) {
+        match self {
+            Source::Live { player, .. } => player.toggle_like(),
+            Source::Demo { liked, .. } => *liked = !*liked,
         }
     }
 
@@ -293,6 +304,7 @@ impl Source {
                 translated,
                 show_translation,
                 track,
+                liked,
             } => {
                 let elapsed = paused_at
                     .unwrap_or_else(Instant::now)
@@ -304,6 +316,7 @@ impl Source {
                     playing: paused_at.is_none(),
                     message: None,
                     notice: None,
+                    liked: Some(*liked),
                 }
             }
         }
@@ -356,6 +369,28 @@ fn set_tab_title(shown: &mut String, view: &View, out: &mut String) -> bool {
     out.push_str(&next);
     out.push_str("\x1b\\");
     true
+}
+
+fn draw_heart_fallback(frame: &mut Frame, liked: Option<bool>) {
+    match liked {
+        Some(true) => {
+            frame.put_glyph(
+                frame.width.saturating_sub(2),
+                frame.height.saturating_sub(1),
+                '♥',
+                THEME.heart,
+            );
+        }
+        Some(false) => {
+            frame.put_glyph(
+                frame.width.saturating_sub(2),
+                frame.height.saturating_sub(1),
+                '♡',
+                THEME.after.fg,
+            );
+        }
+        None => {}
+    }
 }
 
 fn restore() {
@@ -426,6 +461,7 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                             KeyCode::Home => pane.scroll_reset(),
                             KeyCode::Char(' ') => source.toggle_pause(),
                             KeyCode::Char('t') => source.toggle_translation(),
+                            KeyCode::Char('l') => source.toggle_like(),
                             _ => {}
                         }
                         idle_frames = 0;
@@ -435,6 +471,13 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => pane.scroll_by(-1),
                             MouseEventKind::ScrollDown => pane.scroll_by(1),
+                            MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                                if mouse.column >= cols.saturating_sub(8)
+                                    && mouse.row >= rows.saturating_sub(4)
+                                {
+                                    source.toggle_like();
+                                }
+                            }
                             _ => {}
                         }
                         idle_frames = 0;
@@ -470,8 +513,11 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
         frame.clear();
         if frame.height > 0 {
             match &mut layer {
-                Some(layer) => layer.update(&layout, values, THEME.bar),
-                None => draw_bars(&mut frame, &layout, values),
+                Some(layer) => layer.update(&layout, values, THEME.bar, THEME.heart, view.liked),
+                None => {
+                    draw_bars(&mut frame, &layout, values);
+                    draw_heart_fallback(&mut frame, view.liked);
+                }
             }
             pane.draw(&mut frame, &view);
         }

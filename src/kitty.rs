@@ -145,31 +145,206 @@ fn device_attributes(buf: &[u8]) -> bool {
     false
 }
 
+const HEART_01_PNG: &[u8] = include_bytes!("../img/heart_01.png");
+
+fn decode_png_18x18(bytes: &[u8]) -> [u8; 18 * 18 * 4] {
+    let mut idat = Vec::new();
+    let mut idx = 8;
+    while idx + 8 <= bytes.len() {
+        let length = u32::from_be_bytes(bytes[idx..idx + 4].try_into().unwrap_or_default()) as usize;
+        let tag = &bytes[idx + 4..idx + 8];
+        if tag == b"IDAT" && idx + 8 + length <= bytes.len() {
+            idat.extend_from_slice(&bytes[idx + 8..idx + 8 + length]);
+        }
+        idx += 8 + length + 4;
+    }
+    let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&idat).unwrap_or_default();
+    let bpp = 4;
+    let stride = 18 * bpp;
+    let mut out = [0u8; 18 * 18 * 4];
+    for y in 0..18 {
+        if (y + 1) * (stride + 1) > raw.len() {
+            break;
+        }
+        let filter_type = raw[y * (stride + 1)];
+        let row_in = &raw[y * (stride + 1) + 1..(y + 1) * (stride + 1)];
+        let curr = y * stride;
+        let prev = y.saturating_sub(1) * stride;
+        for x in 0..stride {
+            let a = if x >= bpp { out[curr + x - bpp] } else { 0 };
+            let b = if y > 0 { out[prev + x] } else { 0 };
+            let c = if y > 0 && x >= bpp { out[prev + x - bpp] } else { 0 };
+            let val = row_in[x];
+            let recon = match filter_type {
+                0 => val,
+                1 => val.wrapping_add(a),
+                2 => val.wrapping_add(b),
+                3 => val.wrapping_add(((a as u16 + b as u16) / 2) as u8),
+                4 => {
+                    let p = a as i16 + b as i16 - c as i16;
+                    let pa = (p - a as i16).abs();
+                    let pb = (p - b as i16).abs();
+                    let pc = (p - c as i16).abs();
+                    let pred = if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c };
+                    val.wrapping_add(pred)
+                }
+                _ => val,
+            };
+            out[curr + x] = recon;
+        }
+    }
+    out
+}
+
+fn load_heart_empty() -> [u8; 18 * 18 * 4] {
+    let empty_bytes = std::fs::read("img/heart_01.png").unwrap_or_else(|_| HEART_01_PNG.to_vec());
+    decode_png_18x18(&empty_bytes)
+}
+
+fn compute_interior_mask(sprite: &[u8; 18 * 18 * 4]) -> [bool; 18 * 18] {
+    let mut visited = [false; 18 * 18];
+    let mut queue = Vec::with_capacity(18 * 18);
+    for y in 0..18 {
+        for x in 0..18 {
+            if x == 0 || x == 17 || y == 0 || y == 17 {
+                let a = sprite[(y * 18 + x) * 4 + 3];
+                if a == 0 {
+                    visited[y * 18 + x] = true;
+                    queue.push((x, y));
+                }
+            }
+        }
+    }
+    let mut head = 0;
+    while head < queue.len() {
+        let (cx, cy) = queue[head];
+        head += 1;
+        let neighbors = [
+            (cx.wrapping_sub(1), cy),
+            (cx + 1, cy),
+            (cx, cy.wrapping_sub(1)),
+            (cx, cy + 1),
+        ];
+        for (nx, ny) in neighbors {
+            if nx < 18 && ny < 18 {
+                let idx = ny * 18 + nx;
+                let a = sprite[idx * 4 + 3];
+                if a == 0 && !visited[idx] {
+                    visited[idx] = true;
+                    queue.push((nx, ny));
+                }
+            }
+        }
+    }
+    let mut mask = [false; 18 * 18];
+    for y in 0..18 {
+        for x in 0..18 {
+            let idx = y * 18 + x;
+            let a = sprite[idx * 4 + 3];
+            if a == 0 && !visited[idx] {
+                mask[idx] = true;
+            }
+        }
+    }
+    mask
+}
+
+fn blit_sprite_scaled(
+    pixels: &mut [u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    start_x: usize,
+    start_y: usize,
+    sprite: &[u8; 18 * 18 * 4],
+    target_size: usize,
+) {
+    if target_size == 0 {
+        return;
+    }
+    for ty in 0..target_size {
+        let sy = (ty * 18) / target_size;
+        let py = start_y + ty;
+        if py >= height {
+            continue;
+        }
+        for tx in 0..target_size {
+            let sx = (tx * 18) / target_size;
+            let px = start_x + tx;
+            if px >= width {
+                continue;
+            }
+            let offset = (sy * 18 + sx) * 4;
+            let a = sprite[offset + 3];
+            if a == 0 {
+                continue;
+            }
+            let pixel = [sprite[offset], sprite[offset + 1], sprite[offset + 2], a];
+            let p_idx = py * stride + px * 4;
+            if a == 255 {
+                pixels[p_idx..p_idx + 4].copy_from_slice(&pixel);
+            } else {
+                let dst_a = pixels[p_idx + 3] as u32;
+                let src_a = a as u32;
+                let out_a = src_a + dst_a * (255 - src_a) / 255;
+                if out_a > 0 {
+                    for c in 0..3 {
+                        let src_c = pixel[c] as u32;
+                        let dst_c = pixels[p_idx + c] as u32;
+                        let out_c =
+                            (src_c * src_a + dst_c * dst_a * (255 - src_a) / 255) / out_a;
+                        pixels[p_idx + c] = out_c as u8;
+                    }
+                    pixels[p_idx + 3] = out_a as u8;
+                }
+            }
+        }
+    }
+}
+
 /// Capa de barras en píxeles debajo del texto (protocolo gráfico de Kitty, z=-1).
 pub struct BarLayer {
     width: usize,
     height: usize,
     cell_w: usize,
+    cell_h: usize,
     pixels: Vec<u8>,
     heights: Vec<usize>,
     shown: Option<usize>,
     dirty: bool,
     seq: u64,
     pending: VecDeque<(Instant, CString)>,
+    last_liked: Option<bool>,
+    last_color: Option<Rgb>,
+    last_trigger: Instant,
+    smooth_bass: f32,
+    last_beat: f32,
+    heart_empty: [u8; 18 * 18 * 4],
+    heart_mask: [bool; 18 * 18],
 }
 
 impl BarLayer {
     pub fn new(cols: usize, rows: usize, width_px: usize, height_px: usize) -> Option<Self> {
+        let heart_empty = load_heart_empty();
+        let heart_mask = compute_interior_mask(&heart_empty);
         let mut layer = Self {
             width: 0,
             height: 0,
             cell_w: 0,
+            cell_h: 0,
             pixels: Vec::new(),
             heights: Vec::new(),
             shown: None,
             dirty: true,
             seq: 0,
             pending: VecDeque::new(),
+            last_liked: None,
+            last_color: None,
+            last_trigger: Instant::now(),
+            smooth_bass: 0.0,
+            last_beat: 0.0,
+            heart_empty,
+            heart_mask,
         };
         layer
             .resize(cols, rows, width_px, height_px)
@@ -181,15 +356,23 @@ impl BarLayer {
             return false;
         }
         self.cell_w = width_px / cols;
+        self.cell_h = height_px / rows;
         self.width = self.cell_w * cols;
-        self.height = (height_px / rows) * rows;
+        self.height = self.cell_h * rows;
         self.pixels = vec![0; self.width * self.height * 4];
         self.heights.clear();
         self.dirty = true;
         true
     }
 
-    pub fn update(&mut self, layout: &BarLayout, values: &[f32], color: Rgb) {
+    pub fn update(
+        &mut self,
+        layout: &BarLayout,
+        values: &[f32],
+        bar_color: Rgb,
+        heart_color: Rgb,
+        liked: Option<bool>,
+    ) {
         let count = values.len().min(layout.count);
         let mut changed = self.heights.len() != count;
         self.heights.resize(count, usize::MAX);
@@ -201,12 +384,48 @@ impl BarLayer {
                 changed = true;
             }
         }
+        let dt = self.last_trigger.elapsed().as_secs_f32();
+        let bass = values.iter().take(4).copied().fold(0.0f32, f32::max);
+        let mids = values.iter().skip(4).take(14).copied().fold(0.0f32, f32::max) * 0.75;
+        let energy = bass.max(mids);
+        let rise = energy - self.smooth_bass;
+        self.smooth_bass = self.smooth_bass * 0.82 + energy * 0.18;
+
+        // Detecta el ataque rítmico (bombo o guitarras/caja) o pulso regular en calma
+        if (rise > 0.08 && dt > 0.16) || dt > 0.55 {
+            self.last_trigger = Instant::now();
+        }
+
+        let pulse_t = self.last_trigger.elapsed().as_secs_f32();
+        // Latido en 2 etapas ágil y enérgico:
+        // Etapa 1: golpe principal rápido y nítido (0.0..0.09s)
+        // Etapa 2: rebote rítmico secundario (0.09..0.20s)
+        let beat = if liked.is_some() {
+            if pulse_t < 0.09 {
+                (std::f32::consts::PI * pulse_t / 0.09).sin()
+            } else if (0.09..0.20).contains(&pulse_t) {
+                0.45 * (std::f32::consts::PI * (pulse_t - 0.09) / 0.11).sin()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        if (beat - self.last_beat).abs() > 0.01 || (beat == 0.0 && self.last_beat > 0.0) {
+            self.last_beat = beat;
+            changed = true;
+        }
+        if self.last_liked != liked || self.last_color != Some(heart_color) {
+            self.last_liked = liked;
+            self.last_color = Some(heart_color);
+            changed = true;
+        }
         if !changed && !self.dirty {
             return;
         }
 
         self.pixels.fill(0);
-        let Rgb(r, g, b) = color;
+        let Rgb(r, g, b) = bar_color;
         let pixel = [r, g, b, 255];
         let bar_px = BAR_WIDTH * self.cell_w;
         let stride = self.width * 4;
@@ -227,6 +446,50 @@ impl BarLayer {
                     .copy_within(template..template + (x1 - x0) * 4, start);
             }
         }
+
+        if let Some(liked) = liked {
+            let mut sprite = self.heart_empty;
+            if liked {
+                let brighten = |c: u8| -> u8 {
+                    let boost = (255 - c) as f32 * 0.28 * beat;
+                    (c as f32 + boost).min(255.0) as u8
+                };
+                let hr = brighten(heart_color.0);
+                let hg = brighten(heart_color.1);
+                let hb = brighten(heart_color.2);
+                for (idx, &is_interior) in self.heart_mask.iter().enumerate() {
+                    if is_interior {
+                        let p = idx * 4;
+                        sprite[p] = hr;
+                        sprite[p + 1] = hg;
+                        sprite[p + 2] = hb;
+                        sprite[p + 3] = 255;
+                    }
+                }
+            }
+            let scale = (self.cell_h * 2 / 18).max(1);
+            let base_size = 18 * scale;
+            let max_extra = (scale as f32 * 2.2).max(4.0);
+            let extra = (max_extra * beat).round() as usize;
+            let target_size = base_size + extra;
+            let margin_x = self.cell_w;
+            let margin_y = self.cell_h.saturating_sub(1);
+            let base_x = self.width.saturating_sub(base_size + margin_x);
+            let base_y = self.height.saturating_sub(base_size + margin_y);
+            let start_x = base_x.saturating_sub(extra / 2);
+            let start_y = base_y.saturating_sub(extra / 2);
+            blit_sprite_scaled(
+                &mut self.pixels,
+                stride,
+                self.width,
+                self.height,
+                start_x,
+                start_y,
+                &sprite,
+                target_size,
+            );
+        }
+
         self.dirty = true;
     }
 
