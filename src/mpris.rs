@@ -60,6 +60,26 @@ const VERSION_MARKERS: &[&str] = &[
 const CHANNEL_SUFFIXES: &[&str] = &["vevo", "- topic", "oficial", "official"];
 const FEAT_MARKERS: &[&str] = &[" feat. ", " ft. ", " feat ", " ft "];
 
+pub fn send_mpris_cmd(action: &'static str) {
+    thread::Builder::new()
+        .name("mpris-cmd".into())
+        .spawn(move || {
+            let Ok(conn) = Connection::session() else { return };
+            let Ok(dbus) = DBusProxy::new(&conn) else { return };
+            let Ok(names) = dbus.list_names() else { return };
+            let target = names
+                .iter()
+                .find(|n| n.as_str() == "org.mpris.MediaPlayer2.spotify")
+                .or_else(|| names.iter().find(|n| n.as_str().starts_with("org.mpris.MediaPlayer2.")));
+            if let Some(target) = target {
+                if let Ok(proxy) = Proxy::new(&conn, target.as_str(), MPRIS_PATH, PLAYER_IFACE) {
+                    let _ = proxy.call_method(action, &());
+                }
+            }
+        })
+        .ok();
+}
+
 pub struct MprisBackend {
     conn: Option<Connection>,
     inbox: Option<Receiver<zbus::message::Message>>,

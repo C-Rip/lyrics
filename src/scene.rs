@@ -394,6 +394,7 @@ mod tests {
             playing,
             message: None,
             notice: None,
+            liked: None,
         }
     }
 
@@ -432,12 +433,14 @@ mod tests {
                     main_artist: "Artista".into(),
                     duration_ms: 1_000,
                     source: source.into(),
+                    spotify_id: None,
                 })),
                 lyrics: std::sync::Arc::new(Lyrics::NotFound),
                 position_ms: 0,
                 playing: true,
                 message: None,
                 notice: None,
+                liked: None,
             },
         );
         let mut out = String::new();
@@ -460,6 +463,7 @@ mod tests {
             main_artist: artist.into(),
             duration_ms: 1_000,
             source: String::new(),
+            spotify_id: None,
         }));
         sample
     }

@@ -146,6 +146,9 @@ fn device_attributes(buf: &[u8]) -> bool {
 }
 
 const HEART_01_PNG: &[u8] = include_bytes!("../img/heart_01.png");
+const NEXT_PNG: &[u8] = include_bytes!("../img/next.png");
+const PAUSE_PNG: &[u8] = include_bytes!("../img/pause.png");
+const PLAY1_PNG: &[u8] = include_bytes!("../img/play1.png");
 
 fn decode_png_18x18(bytes: &[u8]) -> [u8; 18 * 18 * 4] {
     let mut idat = Vec::new();
@@ -196,9 +199,21 @@ fn decode_png_18x18(bytes: &[u8]) -> [u8; 18 * 18 * 4] {
     out
 }
 
-fn load_heart_empty() -> [u8; 18 * 18 * 4] {
-    let empty_bytes = std::fs::read("img/heart_01.png").unwrap_or_else(|_| HEART_01_PNG.to_vec());
-    decode_png_18x18(&empty_bytes)
+fn load_sprite(path: &str, fallback: &[u8]) -> [u8; 18 * 18 * 4] {
+    let bytes = std::fs::read(path).unwrap_or_else(|_| fallback.to_vec());
+    decode_png_18x18(&bytes)
+}
+
+fn mirror_sprite_horizontal(sprite: &[u8; 18 * 18 * 4]) -> [u8; 18 * 18 * 4] {
+    let mut out = [0u8; 18 * 18 * 4];
+    for y in 0..18 {
+        for x in 0..18 {
+            let src_idx = (y * 18 + (17 - x)) * 4;
+            let dst_idx = (y * 18 + x) * 4;
+            out[dst_idx..dst_idx + 4].copy_from_slice(&sprite[src_idx..src_idx + 4]);
+        }
+    }
+    out
 }
 
 fn compute_interior_mask(sprite: &[u8; 18 * 18 * 4]) -> [bool; 18 * 18] {
@@ -249,7 +264,59 @@ fn compute_interior_mask(sprite: &[u8; 18 * 18 * 4]) -> [bool; 18 * 18] {
     mask
 }
 
-fn blit_sprite_scaled(
+fn compute_solid_interior_mask(sprite: &[u8; 18 * 18 * 4]) -> [bool; 18 * 18] {
+    let mut visited = [false; 18 * 18];
+    let mut queue = Vec::with_capacity(18 * 18);
+    for y in 0..18 {
+        for x in 0..18 {
+            if x == 0 || x == 17 || y == 0 || y == 17 {
+                let a = sprite[(y * 18 + x) * 4 + 3];
+                if a == 0 {
+                    visited[y * 18 + x] = true;
+                    queue.push((x, y));
+                }
+            }
+        }
+    }
+    let mut head = 0;
+    while head < queue.len() {
+        let (cx, cy) = queue[head];
+        head += 1;
+        let neighbors = [
+            (cx.wrapping_sub(1), cy),
+            (cx + 1, cy),
+            (cx, cy.wrapping_sub(1)),
+            (cx, cy + 1),
+        ];
+        for (nx, ny) in neighbors {
+            if nx < 18 && ny < 18 {
+                let idx = ny * 18 + nx;
+                let a = sprite[idx * 4 + 3];
+                if a == 0 && !visited[idx] {
+                    visited[idx] = true;
+                    queue.push((nx, ny));
+                }
+            }
+        }
+    }
+    let mut mask = [false; 18 * 18];
+    for y in 0..18 {
+        for x in 0..18 {
+            let idx = y * 18 + x;
+            let a = sprite[idx * 4 + 3];
+            let is_black = a > 0
+                && sprite[idx * 4] == 0
+                && sprite[idx * 4 + 1] == 0
+                && sprite[idx * 4 + 2] == 0;
+            if !visited[idx] && !is_black {
+                mask[idx] = true;
+            }
+        }
+    }
+    mask
+}
+
+fn blit_sprite(
     pixels: &mut [u8],
     stride: usize,
     width: usize,
@@ -257,19 +324,20 @@ fn blit_sprite_scaled(
     start_x: usize,
     start_y: usize,
     sprite: &[u8; 18 * 18 * 4],
-    target_size: usize,
+    target_w: usize,
+    target_h: usize,
 ) {
-    if target_size == 0 {
+    if target_w == 0 || target_h == 0 {
         return;
     }
-    for ty in 0..target_size {
-        let sy = (ty * 18) / target_size;
+    for ty in 0..target_h {
+        let sy = (ty * 18) / target_h;
         let py = start_y + ty;
         if py >= height {
             continue;
         }
-        for tx in 0..target_size {
-            let sx = (tx * 18) / target_size;
+        for tx in 0..target_w {
+            let sx = (tx * 18) / target_w;
             let px = start_x + tx;
             if px >= width {
                 continue;
@@ -302,6 +370,14 @@ fn blit_sprite_scaled(
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MediaButton {
+    Previous,
+    Next,
+    PlayPause,
+    Like,
+}
+
 /// Capa de barras en píxeles debajo del texto (protocolo gráfico de Kitty, z=-1).
 pub struct BarLayer {
     width: usize,
@@ -316,17 +392,34 @@ pub struct BarLayer {
     pending: VecDeque<(Instant, CString)>,
     last_liked: Option<bool>,
     last_color: Option<Rgb>,
+    last_playing: bool,
     last_trigger: Instant,
     smooth_bass: f32,
     last_beat: f32,
     heart_empty: [u8; 18 * 18 * 4],
     heart_mask: [bool; 18 * 18],
+    sprite_prev: [u8; 18 * 18 * 4],
+    sprite_next: [u8; 18 * 18 * 4],
+    sprite_pause: [u8; 18 * 18 * 4],
+    sprite_play: [u8; 18 * 18 * 4],
+    mask_prev: [bool; 18 * 18],
+    mask_next: [bool; 18 * 18],
+    mask_pause: [bool; 18 * 18],
+    mask_play: [bool; 18 * 18],
 }
 
 impl BarLayer {
     pub fn new(cols: usize, rows: usize, width_px: usize, height_px: usize) -> Option<Self> {
-        let heart_empty = load_heart_empty();
+        let heart_empty = load_sprite("img/heart_01.png", HEART_01_PNG);
         let heart_mask = compute_interior_mask(&heart_empty);
+        let sprite_next = load_sprite("img/next.png", NEXT_PNG);
+        let sprite_prev = mirror_sprite_horizontal(&sprite_next);
+        let sprite_pause = load_sprite("img/pause.png", PAUSE_PNG);
+        let sprite_play = load_sprite("img/play1.png", PLAY1_PNG);
+        let mask_next = compute_solid_interior_mask(&sprite_next);
+        let mask_prev = compute_solid_interior_mask(&sprite_prev);
+        let mask_pause = compute_solid_interior_mask(&sprite_pause);
+        let mask_play = compute_solid_interior_mask(&sprite_play);
         let mut layer = Self {
             width: 0,
             height: 0,
@@ -340,11 +433,20 @@ impl BarLayer {
             pending: VecDeque::new(),
             last_liked: None,
             last_color: None,
+            last_playing: false,
             last_trigger: Instant::now(),
             smooth_bass: 0.0,
             last_beat: 0.0,
             heart_empty,
             heart_mask,
+            sprite_prev,
+            sprite_next,
+            sprite_pause,
+            sprite_play,
+            mask_prev,
+            mask_next,
+            mask_pause,
+            mask_play,
         };
         layer
             .resize(cols, rows, width_px, height_px)
@@ -365,6 +467,44 @@ impl BarLayer {
         true
     }
 
+    pub fn hit_test(&self, col: u16, row: u16, _cols: u16, rows: u16) -> Option<MediaButton> {
+        let bottom_rows = ((self.cell_h * 2 + 17) / self.cell_h.max(1) + 2) as u16;
+        if row < rows.saturating_sub(bottom_rows) {
+            return None;
+        }
+        let scale = (self.cell_h * 2 / 18).max(1);
+        let base_size = 18 * scale;
+        let margin_x = self.cell_w;
+        let gap = (self.cell_w * 3 / 2).max(scale * 4);
+
+        let col_px = col as usize * self.cell_w + self.cell_w / 2;
+
+        let heart_x = self.width.saturating_sub(base_size + margin_x);
+        if col_px >= heart_x.saturating_sub(self.cell_w) {
+            return Some(MediaButton::Like);
+        }
+
+        let x0 = margin_x;
+        let x0_end = x0 + base_size;
+        if col_px >= x0.saturating_sub(self.cell_w / 2) && col_px < x0_end + gap / 2 {
+            return Some(MediaButton::Previous);
+        }
+
+        let x1 = x0 + base_size + gap;
+        let x1_end = x1 + base_size;
+        if col_px >= x1 - gap / 2 && col_px < x1_end + gap / 2 {
+            return Some(MediaButton::Next);
+        }
+
+        let x2 = x1 + base_size + gap;
+        let x2_end = x2 + base_size;
+        if col_px >= x2 - gap / 2 && col_px < x2_end + gap {
+            return Some(MediaButton::PlayPause);
+        }
+
+        None
+    }
+
     pub fn update(
         &mut self,
         layout: &BarLayout,
@@ -372,6 +512,7 @@ impl BarLayer {
         bar_color: Rgb,
         heart_color: Rgb,
         liked: Option<bool>,
+        playing: bool,
     ) {
         let count = values.len().min(layout.count);
         let mut changed = self.heights.len() != count;
@@ -386,21 +527,22 @@ impl BarLayer {
         }
         let dt = self.last_trigger.elapsed().as_secs_f32();
         let bass = values.iter().take(4).copied().fold(0.0f32, f32::max);
-        let mids = values.iter().skip(4).take(14).copied().fold(0.0f32, f32::max) * 0.75;
-        let energy = bass.max(mids);
-        let rise = energy - self.smooth_bass;
-        self.smooth_bass = self.smooth_bass * 0.82 + energy * 0.18;
+        let mids = values.iter().skip(4).take(14).copied().fold(0.0f32, f32::max);
+        let highs = values.iter().skip(18).take(14).copied().fold(0.0f32, f32::max);
+        let energy = (bass * 0.5 + mids * 0.7 + highs * 0.5).min(1.0);
+        let beat_energy = bass.max(mids * 0.75);
+        let rise = beat_energy - self.smooth_bass;
+        self.smooth_bass = self.smooth_bass * 0.82 + beat_energy * 0.18;
 
-        // Detecta el ataque rítmico (bombo o guitarras/caja) o pulso regular en calma
-        if (rise > 0.08 && dt > 0.16) || dt > 0.55 {
+        // Detecta el ataque rítmico (bombo o guitarras/caja) o pulso regular en calma solo si está sonando
+        if playing && ((rise > 0.08 && dt > 0.16) || dt > 0.55) {
             self.last_trigger = Instant::now();
         }
 
         let pulse_t = self.last_trigger.elapsed().as_secs_f32();
         // Latido en 2 etapas ágil y enérgico:
-        // Etapa 1: golpe principal rápido y nítido (0.0..0.09s)
-        // Etapa 2: rebote rítmico secundario (0.09..0.20s)
-        let beat = if liked.is_some() {
+        // Solo late cuando la canción se está reproduciendo (playing == true)
+        let beat = if playing && liked.is_some() {
             if pulse_t < 0.09 {
                 (std::f32::consts::PI * pulse_t / 0.09).sin()
             } else if (0.09..0.20).contains(&pulse_t) {
@@ -415,9 +557,16 @@ impl BarLayer {
             self.last_beat = beat;
             changed = true;
         }
-        if self.last_liked != liked || self.last_color != Some(heart_color) {
+        if self.last_liked != liked
+            || self.last_color != Some(heart_color)
+            || self.last_playing != playing
+        {
             self.last_liked = liked;
             self.last_color = Some(heart_color);
+            self.last_playing = playing;
+            changed = true;
+        }
+        if playing && energy > 0.01 {
             changed = true;
         }
         if !changed && !self.dirty {
@@ -447,38 +596,127 @@ impl BarLayer {
             }
         }
 
+        let scale = (self.cell_h * 2 / 18).max(1);
+        let base_size = 18 * scale;
+        let margin_x = self.cell_w;
+        let margin_y = self.cell_h.saturating_sub(1);
+        let base_y = self.height.saturating_sub(base_size + margin_y);
+        let gap = (self.cell_w * 3 / 2).max(scale * 4);
+
+        // Tono de los botones: color luminoso como el destello del latido del corazón
+        let btn_brighten = |c: u8| -> u8 {
+            let boost = (255 - c) as f32 * (0.24 + 0.08 * beat);
+            (c as f32 + boost).min(255.0) as u8
+        };
+        let btn_tint = [
+            btn_brighten(heart_color.0),
+            btn_brighten(heart_color.1),
+            btn_brighten(heart_color.2),
+            255,
+        ];
+
+        let fill_sprite = |base: &[u8; 18 * 18 * 4], mask: &[bool; 18 * 18]| -> [u8; 18 * 18 * 4] {
+            let mut s = *base;
+            for (idx, &is_interior) in mask.iter().enumerate() {
+                if is_interior {
+                    let p = idx * 4;
+                    s[p..p + 4].copy_from_slice(&btn_tint);
+                }
+            }
+            s
+        };
+
+        let sprite_prev_tinted = fill_sprite(&self.sprite_prev, &self.mask_prev);
+        let sprite_next_tinted = fill_sprite(&self.sprite_next, &self.mask_next);
+        let sprite_pp_tinted = if playing {
+            fill_sprite(&self.sprite_pause, &self.mask_pause)
+        } else {
+            fill_sprite(&self.sprite_play, &self.mask_play)
+        };
+
+        // 1 y 2. Salto vertical normalizado y sincronizado al ritmo para los botones
+        let jump = if playing {
+            beat * (scale as f32 * 4.0)
+        } else {
+            0.0
+        };
+        let y_btn = (base_y as f32 - jump).max(0.0) as usize;
+
+        // Botón Anterior (<<): espejo de next.png
+        let x_prev = margin_x;
+        blit_sprite(
+            &mut self.pixels,
+            stride,
+            self.width,
+            self.height,
+            x_prev,
+            y_btn,
+            &sprite_prev_tinted,
+            base_size,
+            base_size,
+        );
+
+        // Botón Siguiente (>>): next.png
+        let x_next = x_prev + base_size + gap;
+        blit_sprite(
+            &mut self.pixels,
+            stride,
+            self.width,
+            self.height,
+            x_next,
+            y_btn,
+            &sprite_next_tinted,
+            base_size,
+            base_size,
+        );
+
+        // 3. Botón Play/Pausa:
+        // Usa la misma animación de salto sincronizado al ritmo (en pausa queda quieto)
+        let x_pp = x_next + base_size + gap;
+        blit_sprite(
+            &mut self.pixels,
+            stride,
+            self.width,
+            self.height,
+            x_pp,
+            y_btn,
+            &sprite_pp_tinted,
+            base_size,
+            base_size,
+        );
+
+        // 4. Corazón (Me gusta en Spotify) en la esquina inferior derecha
         if let Some(liked) = liked {
             let mut sprite = self.heart_empty;
             if liked {
-                let brighten = |c: u8| -> u8 {
+                let heart_brighten = |c: u8| -> u8 {
                     let boost = (255 - c) as f32 * 0.28 * beat;
                     (c as f32 + boost).min(255.0) as u8
                 };
-                let hr = brighten(heart_color.0);
-                let hg = brighten(heart_color.1);
-                let hb = brighten(heart_color.2);
+                let heart_tint = [
+                    heart_brighten(heart_color.0),
+                    heart_brighten(heart_color.1),
+                    heart_brighten(heart_color.2),
+                    255,
+                ];
                 for (idx, &is_interior) in self.heart_mask.iter().enumerate() {
                     if is_interior {
                         let p = idx * 4;
-                        sprite[p] = hr;
-                        sprite[p + 1] = hg;
-                        sprite[p + 2] = hb;
-                        sprite[p + 3] = 255;
+                        sprite[p..p + 4].copy_from_slice(&heart_tint);
                     }
                 }
             }
-            let scale = (self.cell_h * 2 / 18).max(1);
-            let base_size = 18 * scale;
             let max_extra = (scale as f32 * 2.2).max(4.0);
-            let extra = (max_extra * beat).round() as usize;
+            let extra = if playing {
+                (max_extra * beat).round() as usize
+            } else {
+                0
+            };
             let target_size = base_size + extra;
-            let margin_x = self.cell_w;
-            let margin_y = self.cell_h.saturating_sub(1);
             let base_x = self.width.saturating_sub(base_size + margin_x);
-            let base_y = self.height.saturating_sub(base_size + margin_y);
             let start_x = base_x.saturating_sub(extra / 2);
             let start_y = base_y.saturating_sub(extra / 2);
-            blit_sprite_scaled(
+            blit_sprite(
                 &mut self.pixels,
                 stride,
                 self.width,
@@ -486,6 +724,7 @@ impl BarLayer {
                 start_x,
                 start_y,
                 &sprite,
+                target_size,
                 target_size,
             );
         }
@@ -580,7 +819,7 @@ mod tests {
     fn bars_are_drawn_from_the_bottom_and_erased_when_they_drop() {
         let mut layer = BarLayer::new(5, 4, 10, 8).unwrap();
         let layout = bar_layout(5);
-        layer.update(&layout, &[1.0, 0.0], Rgb(1, 2, 3));
+        layer.update(&layout, &[1.0, 0.0], Rgb(1, 2, 3), Rgb(255, 30, 60), None, false);
         let alpha = |l: &BarLayer, x: usize, y: usize| l.pixels[(y * l.width + x) * 4 + 3];
         assert_eq!(alpha(&layer, 0, 0), 255);
         assert_eq!(alpha(&layer, 3, 7), 255);
@@ -590,15 +829,31 @@ mod tests {
 
         let mut out = String::new();
         assert!(layer.emit(&mut out).unwrap());
-        layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3));
+        layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3), Rgb(255, 30, 60), None, false);
         assert_eq!(alpha(&layer, 0, 0), 0);
         assert!(layer.emit(&mut out).unwrap());
         assert!(out.contains("z=-1"));
         assert!(out.contains(&format!("a=d,d=I,i={}", IDS[0])));
 
         out.clear();
-        layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3));
+        layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3), Rgb(255, 30, 60), None, false);
         assert!(!layer.emit(&mut out).unwrap());
+    }
+
+    #[test]
+    fn mirror_sprite_flips_x() {
+        let mut sprite = [0u8; 18 * 18 * 4];
+        sprite[0] = 42; // (0, 0)
+        let mirrored = mirror_sprite_horizontal(&sprite);
+        assert_eq!(mirrored[17 * 4], 42); // (17, 0)
+    }
+
+    #[test]
+    fn hit_test_locates_buttons() {
+        let layer = BarLayer::new(80, 24, 800, 480).unwrap();
+        // bottom row
+        assert_eq!(layer.hit_test(1, 23, 80, 24), Some(MediaButton::Previous));
+        assert_eq!(layer.hit_test(79, 23, 80, 24), Some(MediaButton::Like));
     }
 
     #[test]

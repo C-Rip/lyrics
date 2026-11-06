@@ -18,7 +18,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEv
 use crossterm::{cursor, execute, terminal};
 
 use audio::{AudioTap, SAMPLE_RATE, WINDOW};
-use kitty::BarLayer;
+use kitty::{BarLayer, MediaButton};
 use lyrics::Lyrics;
 use player::{Player, View};
 use render::{Frame, Screen};
@@ -53,12 +53,15 @@ Idiomas: es, es-latam, en, en-gb, pt, pt-pt, fr, fr-ca, de, de-ch, it, ja, ko, z
 
 Teclas:
   q, Esc, Ctrl+C       salir
-  flechas, j/k, rueda  recorrer la letra en pausa (vuelve sola al dar play)
+  ↑/↓, j/k, rueda      recorrer la letra en pausa (vuelve sola al dar play)
   RePág/AvPág          media pantalla
   Inicio               volver a la línea que suena
-  espacio              pausa (solo en --demo)
+  p                    reproducir / pausar
+  n, ←                 canción anterior
+  m, →                 canción siguiente
   t                    original o traducción (con --translate)
-  l, clic en corazón   guardar o quitar de Me gusta en Spotify";
+  l, clic en corazón   guardar o quitar de Me gusta en Spotify
+  clic en botones      control multimedia (anterior, siguiente, reproducir/pausar)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -230,16 +233,29 @@ impl Source {
         })
     }
 
-    /// Solo en el demo: la pausa de Spotify se controla desde Spotify.
     fn toggle_pause(&mut self) {
-        if let Source::Demo {
-            started, paused_at, ..
-        } = self
-        {
-            match paused_at.take() {
+        match self {
+            Source::Live { .. } => mpris::send_mpris_cmd("PlayPause"),
+            Source::Demo {
+                started, paused_at, ..
+            } => match paused_at.take() {
                 Some(at) => *started += at.elapsed(),
                 None => *paused_at = Some(Instant::now()),
-            }
+            },
+        }
+    }
+
+    fn next(&mut self) {
+        match self {
+            Source::Live { .. } => mpris::send_mpris_cmd("Next"),
+            Source::Demo { started, .. } => *started = Instant::now(),
+        }
+    }
+
+    fn previous(&mut self) {
+        match self {
+            Source::Live { .. } => mpris::send_mpris_cmd("Previous"),
+            Source::Demo { started, .. } => *started = Instant::now(),
         }
     }
 
@@ -393,6 +409,19 @@ fn draw_heart_fallback(frame: &mut Frame, liked: Option<bool>) {
     }
 }
 
+fn draw_controls_fallback(frame: &mut Frame, playing: bool) {
+    if frame.width < 20 || frame.height == 0 {
+        return;
+    }
+    let y = frame.height.saturating_sub(1);
+    let syms = if playing { "⏮  ⏭  ⏸" } else { "⏮  ⏭  ▶" };
+    let mut x = 1;
+    for ch in syms.chars() {
+        frame.put_glyph(x, y, ch, THEME.after.fg);
+        x += 1;
+    }
+}
+
 fn restore() {
     let mut stdout = io::stdout();
     let _ = write!(stdout, "\x1b[0m{MOUSE_OFF}{TITLE_POP}");
@@ -459,7 +488,9 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                             KeyCode::PageUp => pane.scroll_by(-page),
                             KeyCode::PageDown => pane.scroll_by(page),
                             KeyCode::Home => pane.scroll_reset(),
-                            KeyCode::Char(' ') => source.toggle_pause(),
+                            KeyCode::Char('p') => source.toggle_pause(),
+                            KeyCode::Char('n') | KeyCode::Left => source.previous(),
+                            KeyCode::Char('m') | KeyCode::Right => source.next(),
                             KeyCode::Char('t') => source.toggle_translation(),
                             KeyCode::Char('l') => source.toggle_like(),
                             _ => {}
@@ -472,10 +503,24 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                             MouseEventKind::ScrollUp => pane.scroll_by(-1),
                             MouseEventKind::ScrollDown => pane.scroll_by(1),
                             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                                if mouse.column >= cols.saturating_sub(8)
-                                    && mouse.row >= rows.saturating_sub(4)
-                                {
-                                    source.toggle_like();
+                                if let Some(layer) = &layer {
+                                    match layer.hit_test(mouse.column, mouse.row, cols, rows) {
+                                        Some(MediaButton::Previous) => source.previous(),
+                                        Some(MediaButton::Next) => source.next(),
+                                        Some(MediaButton::PlayPause) => source.toggle_pause(),
+                                        Some(MediaButton::Like) => source.toggle_like(),
+                                        None => {}
+                                    }
+                                } else if mouse.row >= rows.saturating_sub(3) {
+                                    if mouse.column >= cols.saturating_sub(6) {
+                                        source.toggle_like();
+                                    } else if mouse.column <= 4 {
+                                        source.previous();
+                                    } else if mouse.column <= 9 {
+                                        source.next();
+                                    } else if mouse.column <= 15 {
+                                        source.toggle_pause();
+                                    }
                                 }
                             }
                             _ => {}
@@ -513,9 +558,17 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
         frame.clear();
         if frame.height > 0 {
             match &mut layer {
-                Some(layer) => layer.update(&layout, values, THEME.bar, THEME.heart, view.liked),
+                Some(layer) => layer.update(
+                    &layout,
+                    values,
+                    THEME.bar,
+                    THEME.heart,
+                    view.liked,
+                    view.playing,
+                ),
                 None => {
                     draw_bars(&mut frame, &layout, values);
+                    draw_controls_fallback(&mut frame, view.playing);
                     draw_heart_fallback(&mut frame, view.liked);
                 }
             }
