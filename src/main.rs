@@ -415,10 +415,8 @@ fn draw_controls_fallback(frame: &mut Frame, playing: bool) {
     }
     let y = frame.height.saturating_sub(1);
     let syms = if playing { "⏮  ⏭  ⏸" } else { "⏮  ⏭  ▶" };
-    let mut x = 1;
-    for ch in syms.chars() {
-        frame.put_glyph(x, y, ch, THEME.after.fg);
-        x += 1;
+    for (x, ch) in (1..).zip(syms.chars()) {
+        frame.put_glyph(x, y, ch, THEME.current.fg);
     }
 }
 
@@ -561,8 +559,11 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                 Some(layer) => layer.update(
                     &layout,
                     values,
-                    THEME.bar,
-                    THEME.heart,
+                    kitty::LayerColors {
+                        bar: THEME.bar,
+                        heart: THEME.heart,
+                        btn: THEME.current.fg,
+                    },
                     view.liked,
                     view.playing,
                 ),

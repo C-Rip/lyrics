@@ -316,29 +316,41 @@ fn compute_solid_interior_mask(sprite: &[u8; 18 * 18 * 4]) -> [bool; 18 * 18] {
     mask
 }
 
+#[derive(Copy, Clone)]
+pub struct LayerColors {
+    pub bar: Rgb,
+    pub heart: Rgb,
+    pub btn: Rgb,
+}
+
+#[derive(Copy, Clone)]
+struct Rect {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
 fn blit_sprite(
     pixels: &mut [u8],
     stride: usize,
-    width: usize,
-    height: usize,
-    start_x: usize,
-    start_y: usize,
+    bounds: (usize, usize),
+    dst: Rect,
     sprite: &[u8; 18 * 18 * 4],
-    target_w: usize,
-    target_h: usize,
 ) {
-    if target_w == 0 || target_h == 0 {
+    if dst.w == 0 || dst.h == 0 {
         return;
     }
-    for ty in 0..target_h {
-        let sy = (ty * 18) / target_h;
-        let py = start_y + ty;
+    let (width, height) = bounds;
+    for ty in 0..dst.h {
+        let sy = (ty * 18) / dst.h;
+        let py = dst.y + ty;
         if py >= height {
             continue;
         }
-        for tx in 0..target_w {
-            let sx = (tx * 18) / target_w;
-            let px = start_x + tx;
+        for tx in 0..dst.w {
+            let sx = (tx * 18) / dst.w;
+            let px = dst.x + tx;
             if px >= width {
                 continue;
             }
@@ -355,12 +367,12 @@ fn blit_sprite(
                 let dst_a = pixels[p_idx + 3] as u32;
                 let src_a = a as u32;
                 let out_a = src_a + dst_a * (255 - src_a) / 255;
-                if out_a > 0 {
+                if let Some(out_a_nz) = std::num::NonZeroU32::new(out_a) {
                     for c in 0..3 {
                         let src_c = pixel[c] as u32;
                         let dst_c = pixels[p_idx + c] as u32;
                         let out_c =
-                            (src_c * src_a + dst_c * dst_a * (255 - src_a) / 255) / out_a;
+                            (src_c * src_a + dst_c * dst_a * (255 - src_a) / 255) / out_a_nz.get();
                         pixels[p_idx + c] = out_c as u8;
                     }
                     pixels[p_idx + 3] = out_a as u8;
@@ -392,6 +404,7 @@ pub struct BarLayer {
     pending: VecDeque<(Instant, CString)>,
     last_liked: Option<bool>,
     last_color: Option<Rgb>,
+    last_btn_color: Option<Rgb>,
     last_playing: bool,
     last_trigger: Instant,
     smooth_bass: f32,
@@ -433,6 +446,7 @@ impl BarLayer {
             pending: VecDeque::new(),
             last_liked: None,
             last_color: None,
+            last_btn_color: None,
             last_playing: false,
             last_trigger: Instant::now(),
             smooth_bass: 0.0,
@@ -509,11 +523,13 @@ impl BarLayer {
         &mut self,
         layout: &BarLayout,
         values: &[f32],
-        bar_color: Rgb,
-        heart_color: Rgb,
+        colors: LayerColors,
         liked: Option<bool>,
         playing: bool,
     ) {
+        let bar_color = colors.bar;
+        let heart_color = colors.heart;
+        let btn_color = colors.btn;
         let count = values.len().min(layout.count);
         let mut changed = self.heights.len() != count;
         self.heights.resize(count, usize::MAX);
@@ -559,10 +575,12 @@ impl BarLayer {
         }
         if self.last_liked != liked
             || self.last_color != Some(heart_color)
+            || self.last_btn_color != Some(btn_color)
             || self.last_playing != playing
         {
             self.last_liked = liked;
             self.last_color = Some(heart_color);
+            self.last_btn_color = Some(btn_color);
             self.last_playing = playing;
             changed = true;
         }
@@ -603,15 +621,15 @@ impl BarLayer {
         let base_y = self.height.saturating_sub(base_size + margin_y);
         let gap = (self.cell_w * 3 / 2).max(scale * 4);
 
-        // Tono de los botones: color luminoso como el destello del latido del corazón
+        // Tono de los botones: color de la letra activa (THEME.current.fg) con destello al ritmo
         let btn_brighten = |c: u8| -> u8 {
-            let boost = (255 - c) as f32 * (0.24 + 0.08 * beat);
+            let boost = (255 - c) as f32 * (0.20 * beat);
             (c as f32 + boost).min(255.0) as u8
         };
         let btn_tint = [
-            btn_brighten(heart_color.0),
-            btn_brighten(heart_color.1),
-            btn_brighten(heart_color.2),
+            btn_brighten(btn_color.0),
+            btn_brighten(btn_color.1),
+            btn_brighten(btn_color.2),
             255,
         ];
 
@@ -642,18 +660,21 @@ impl BarLayer {
         };
         let y_btn = (base_y as f32 - jump).max(0.0) as usize;
 
+        let bounds = (self.width, self.height);
+
         // Botón Anterior (<<): espejo de next.png
         let x_prev = margin_x;
         blit_sprite(
             &mut self.pixels,
             stride,
-            self.width,
-            self.height,
-            x_prev,
-            y_btn,
+            bounds,
+            Rect {
+                x: x_prev,
+                y: y_btn,
+                w: base_size,
+                h: base_size,
+            },
             &sprite_prev_tinted,
-            base_size,
-            base_size,
         );
 
         // Botón Siguiente (>>): next.png
@@ -661,13 +682,14 @@ impl BarLayer {
         blit_sprite(
             &mut self.pixels,
             stride,
-            self.width,
-            self.height,
-            x_next,
-            y_btn,
+            bounds,
+            Rect {
+                x: x_next,
+                y: y_btn,
+                w: base_size,
+                h: base_size,
+            },
             &sprite_next_tinted,
-            base_size,
-            base_size,
         );
 
         // 3. Botón Play/Pausa:
@@ -676,13 +698,14 @@ impl BarLayer {
         blit_sprite(
             &mut self.pixels,
             stride,
-            self.width,
-            self.height,
-            x_pp,
-            y_btn,
+            bounds,
+            Rect {
+                x: x_pp,
+                y: y_btn,
+                w: base_size,
+                h: base_size,
+            },
             &sprite_pp_tinted,
-            base_size,
-            base_size,
         );
 
         // 4. Corazón (Me gusta en Spotify) en la esquina inferior derecha
@@ -719,13 +742,14 @@ impl BarLayer {
             blit_sprite(
                 &mut self.pixels,
                 stride,
-                self.width,
-                self.height,
-                start_x,
-                start_y,
+                bounds,
+                Rect {
+                    x: start_x,
+                    y: start_y,
+                    w: target_size,
+                    h: target_size,
+                },
                 &sprite,
-                target_size,
-                target_size,
             );
         }
 
@@ -819,7 +843,12 @@ mod tests {
     fn bars_are_drawn_from_the_bottom_and_erased_when_they_drop() {
         let mut layer = BarLayer::new(5, 4, 10, 8).unwrap();
         let layout = bar_layout(5);
-        layer.update(&layout, &[1.0, 0.0], Rgb(1, 2, 3), Rgb(255, 30, 60), None, false);
+        let colors = LayerColors {
+            bar: Rgb(1, 2, 3),
+            heart: Rgb(255, 30, 60),
+            btn: Rgb(0, 255, 255),
+        };
+        layer.update(&layout, &[1.0, 0.0], colors, None, false);
         let alpha = |l: &BarLayer, x: usize, y: usize| l.pixels[(y * l.width + x) * 4 + 3];
         assert_eq!(alpha(&layer, 0, 0), 255);
         assert_eq!(alpha(&layer, 3, 7), 255);
@@ -829,14 +858,14 @@ mod tests {
 
         let mut out = String::new();
         assert!(layer.emit(&mut out).unwrap());
-        layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3), Rgb(255, 30, 60), None, false);
+        layer.update(&layout, &[0.0, 0.0], colors, None, false);
         assert_eq!(alpha(&layer, 0, 0), 0);
         assert!(layer.emit(&mut out).unwrap());
         assert!(out.contains("z=-1"));
         assert!(out.contains(&format!("a=d,d=I,i={}", IDS[0])));
 
         out.clear();
-        layer.update(&layout, &[0.0, 0.0], Rgb(1, 2, 3), Rgb(255, 30, 60), None, false);
+        layer.update(&layout, &[0.0, 0.0], colors, None, false);
         assert!(!layer.emit(&mut out).unwrap());
     }
 

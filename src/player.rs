@@ -292,23 +292,23 @@ fn run(
                 s.liked = if track.spotify_id.is_some() { Some(false) } else { None };
             }
         }
-        if changed {
-            if let Some(sid) = track.spotify_id.clone() {
-                let shared = Arc::clone(&state);
-                thread::Builder::new()
-                    .name("spotify-check-saved".into())
-                    .spawn(move || {
-                        if let Ok(mut client) = spotify::Spotify::new(spotify::http_agent()) {
-                            if let Ok(saved) = client.is_saved(&sid) {
-                                let mut s = shared.lock().unwrap();
-                                if s.now.as_ref().and_then(|n| n.track.spotify_id.as_ref()) == Some(&sid) {
-                                    s.liked = Some(saved);
-                                }
-                            }
+        if changed
+            && let Some(sid) = track.spotify_id.clone()
+        {
+            let shared = Arc::clone(&state);
+            thread::Builder::new()
+                .name("spotify-check-saved".into())
+                .spawn(move || {
+                    if let Ok(mut client) = spotify::Spotify::new(spotify::http_agent())
+                        && let Ok(saved) = client.is_saved(&sid)
+                    {
+                        let mut s = shared.lock().unwrap();
+                        if s.now.as_ref().and_then(|n| n.track.spotify_id.as_ref()) == Some(&sid) {
+                            s.liked = Some(saved);
                         }
-                    })
-                    .ok();
-            }
+                    }
+                })
+                .ok();
         }
         let due = retry.as_ref().is_some_and(|(at, _)| sampled >= *at);
         if changed || due {
