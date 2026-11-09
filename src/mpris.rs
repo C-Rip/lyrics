@@ -6,7 +6,7 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -60,21 +60,29 @@ const VERSION_MARKERS: &[&str] = &[
 const CHANNEL_SUFFIXES: &[&str] = &["vevo", "- topic", "oficial", "official"];
 const FEAT_MARKERS: &[&str] = &[" feat. ", " ft. ", " feat ", " ft "];
 
+static ACTIVE_PLAYER: Mutex<Option<String>> = Mutex::new(None);
+
 pub fn send_mpris_cmd(action: &'static str) {
+    let target = ACTIVE_PLAYER.lock().ok().and_then(|guard| guard.clone());
     thread::Builder::new()
         .name("mpris-cmd".into())
         .spawn(move || {
             let Ok(conn) = Connection::session() else { return };
-            let Ok(dbus) = DBusProxy::new(&conn) else { return };
-            let Ok(names) = dbus.list_names() else { return };
-            let target = names
-                .iter()
-                .find(|n| n.as_str() == "org.mpris.MediaPlayer2.spotify")
-                .or_else(|| names.iter().find(|n| n.as_str().starts_with("org.mpris.MediaPlayer2.")));
-            if let Some(target) = target {
-                if let Ok(proxy) = Proxy::new(&conn, target.as_str(), MPRIS_PATH, PLAYER_IFACE) {
-                    let _ = proxy.call_method(action, &());
-                }
+            let target = target.or_else(|| {
+                let dbus = DBusProxy::new(&conn).ok()?;
+                let names = dbus.list_names().ok()?;
+                let mut candidates: Vec<String> = names
+                    .into_iter()
+                    .filter(|n| selectable(n.as_str()))
+                    .map(|n| n.to_string())
+                    .collect();
+                candidates.sort_by_key(|n| !is_desktop(n));
+                candidates.into_iter().next()
+            });
+            if let Some(target) = target
+                && let Ok(proxy) = Proxy::new(&conn, target.as_str(), MPRIS_PATH, PLAYER_IFACE)
+            {
+                let _ = proxy.call_method(action, &());
             }
         })
         .ok();
@@ -155,6 +163,13 @@ impl MprisBackend {
         Ok(())
     }
 
+    fn set_active(&mut self, active: Option<String>) {
+        self.active = active;
+        if let Ok(mut slot) = ACTIVE_PLAYER.lock() {
+            *slot = self.active.clone();
+        }
+    }
+
     fn drop_bus(&mut self) {
         if let Some(conn) = self.conn.take() {
             let _ = conn.close();
@@ -162,7 +177,7 @@ impl MprisBackend {
         self.inbox = None;
         self.players.clear();
         self.owners.clear();
-        self.active = None;
+        self.set_active(None);
         self.activity.clear();
         self.scanned = false;
     }
@@ -347,7 +362,8 @@ impl MprisBackend {
                 seen: self.activity.get(name).copied(),
             })
             .collect();
-        self.active = choose(&candidates, self.active.as_deref()).map(|picked| picked.name.clone());
+        let picked = choose(&candidates, self.active.as_deref()).map(|picked| picked.name.clone());
+        self.set_active(picked);
     }
 
     fn active_playing(&self) -> bool {
@@ -534,13 +550,13 @@ fn value_string_or_path(value: &OwnedValue) -> Option<String> {
 }
 
 fn extract_spotify_id(url: Option<&str>, track_id: Option<&str>) -> Option<String> {
-    if let Some(url) = url {
-        if let Some(pos) = url.find("open.spotify.com/track/") {
-            let rest = &url[pos + "open.spotify.com/track/".len()..];
-            let id = rest.split(['?', '/', '#']).next().unwrap_or(rest);
-            if !id.is_empty() {
-                return Some(id.to_string());
-            }
+    if let Some(url) = url
+        && let Some(pos) = url.find("open.spotify.com/track/")
+    {
+        let rest = &url[pos + "open.spotify.com/track/".len()..];
+        let id = rest.split(['?', '/', '#']).next().unwrap_or(rest);
+        if !id.is_empty() {
+            return Some(id.to_string());
         }
     }
     if let Some(tid) = track_id {
