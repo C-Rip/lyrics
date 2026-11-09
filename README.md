@@ -121,6 +121,22 @@ Las barras en píxeles salen de una prueba al arrancar. Si la entrada y la salid
 
 El dibujo va a unos 60 cuadros por segundo mientras algo cambia. Tras medio segundo quieto baja a 10. Texto e imagen salen en la misma actualización.
 
+### Configuración de colores
+
+Se puede personalizar el tema creando el archivo `~/.config/lyrics/config.conf` (o `lyrics.conf`). Un archivo de ejemplo con los valores por defecto se encuentra en `config/config.conf`:
+
+```ini
+# ~/.config/lyrics/config.conf
+bar = "#565f89"      # Barras del espectro de audio
+buttons = "#00ffff"  # Botones multimedia (⏮, ⏭, ▶/⏸)
+heart = "#ff1e3c"    # Corazón de "Me gusta"
+before = "#ffffff"   # Letras anteriores
+current = "#00ffff"  # Letra actual en reproducción
+after = "#414868"    # Letras siguientes
+```
+
+Los colores admiten formato hexadecimal (`"#565f89"` o `565f89`), decimal RGB (`"86, 95, 137"` o `"rgb(86, 95, 137)"`) y nombres de colores básicos (`"cyan"`, `"red"`, `"white"`, etc.).
+
 ### Teclas
 
 | Tecla | Acción |
@@ -136,6 +152,7 @@ El dibujo va a unos 60 cuadros por segundo mientras algo cambia. Tras medio segu
 
 | Qué | Dónde |
 | --- | --- |
+| Archivo de configuración (`config.conf`) | `$XDG_CONFIG_HOME/lyrics` o `~/.config/lyrics` (también `/etc/lyrics`) |
 | Sesión de Spotify y clave de DeepL | `$XDG_STATE_HOME/lyrics` o `~/.local/state/lyrics` |
 | Letras en caché (`.lyr`) | `$XDG_CACHE_HOME/lyrics` o `~/.cache/lyrics` |
 | Traducciones | el mismo directorio de caché, en `translations/` |

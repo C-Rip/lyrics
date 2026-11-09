@@ -45,6 +45,10 @@ pub fn cache_dir() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache").join("lyrics")
 }
 
+pub fn config_dir() -> PathBuf {
+    xdg("XDG_CONFIG_HOME", ".config").join("lyrics")
+}
+
 pub(crate) fn state_dir() -> PathBuf {
     xdg("XDG_STATE_HOME", ".local/state").join("lyrics")
 }

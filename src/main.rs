@@ -22,7 +22,7 @@ use kitty::{BarLayer, MediaButton};
 use lyrics::Lyrics;
 use player::{Player, View};
 use render::{Frame, Screen};
-use scene::{LyricsPane, THEME, bar_layout, draw_bars, window_title};
+use scene::{LyricsPane, bar_layout, draw_bars, theme, window_title};
 use spectrum::Analyzer;
 use spotify::Track;
 
@@ -394,7 +394,7 @@ fn draw_heart_fallback(frame: &mut Frame, liked: Option<bool>) {
                 frame.width.saturating_sub(2),
                 frame.height.saturating_sub(1),
                 '♥',
-                THEME.heart,
+                theme().heart,
             );
         }
         Some(false) => {
@@ -402,7 +402,7 @@ fn draw_heart_fallback(frame: &mut Frame, liked: Option<bool>) {
                 frame.width.saturating_sub(2),
                 frame.height.saturating_sub(1),
                 '♡',
-                THEME.after.fg,
+                theme().after.fg,
             );
         }
         None => {}
@@ -416,7 +416,7 @@ fn draw_controls_fallback(frame: &mut Frame, playing: bool) {
     let y = frame.height.saturating_sub(1);
     let syms = if playing { "⏮  ⏭  ⏸" } else { "⏮  ⏭  ▶" };
     for (x, ch) in (1..).zip(syms.chars()) {
-        frame.put_glyph(x, y, ch, THEME.current.fg);
+        frame.put_glyph(x, y, ch, theme().buttons);
     }
 }
 
@@ -560,9 +560,9 @@ fn event_loop(source: &mut Source, stdout: &mut io::Stdout) -> io::Result<()> {
                     &layout,
                     values,
                     kitty::LayerColors {
-                        bar: THEME.bar,
-                        heart: THEME.heart,
-                        btn: THEME.current.fg,
+                        bar: theme().bar,
+                        heart: theme().heart,
+                        btn: theme().buttons,
                     },
                     view.liked,
                     view.playing,

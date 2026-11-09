@@ -1,38 +1,164 @@
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
 use crate::lyrics::Lyrics;
 use crate::player::View;
 use crate::render::{BOLD, FAINT, Frame, Rgb, text_width};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Style {
     pub fg: Rgb,
     pub attr: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Theme {
     pub bar: Rgb,
-    /// Color del relleno del corazón cuando está en Me gusta (ej. azul LibreSprite o barra)
+    pub buttons: Rgb,
+    /// Color del relleno del corazón cuando está en Me gusta (ej. rojo o acento)
     pub heart: Rgb,
     pub before: Style,
     pub current: Style,
     pub after: Style,
 }
 
-/// Colores de tu config de sptlrx y barras en el tono de cava detrás de la letra.
-pub const THEME: Theme = Theme {
-    bar: Rgb(86, 95, 137),
-    heart: Rgb(255, 30, 60),
-    before: Style {
-        fg: Rgb(255, 255, 255),
-        attr: FAINT,
-    },
-    current: Style {
-        fg: Rgb(0, 255, 255),
-        attr: BOLD,
-    },
-    after: Style {
-        fg: Rgb(65, 72, 104),
-        attr: FAINT,
-    },
-};
+impl Theme {
+    pub const DEFAULT: Self = Self {
+        bar: Rgb(86, 95, 137),
+        buttons: Rgb(0, 255, 255),
+        heart: Rgb(255, 30, 60),
+        before: Style {
+            fg: Rgb(255, 255, 255),
+            attr: FAINT,
+        },
+        current: Style {
+            fg: Rgb(0, 255, 255),
+            attr: BOLD,
+        },
+        after: Style {
+            fg: Rgb(65, 72, 104),
+            attr: FAINT,
+        },
+    };
+
+    pub fn load() -> Self {
+        for path in config_paths() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                return Self::parse(&content);
+            }
+        }
+        Self::DEFAULT
+    }
+
+    pub fn parse(text: &str) -> Self {
+        let mut theme = Self::DEFAULT;
+        let mut custom_buttons = false;
+        let mut custom_current = false;
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with(';')
+                || line.starts_with("//")
+            {
+                continue;
+            }
+            let (key, val) = match line.split_once(['=', ':']) {
+                Some((k, v)) => (k.trim().to_lowercase(), v.trim()),
+                None => continue,
+            };
+            let Some(color) = parse_color(val) else {
+                continue;
+            };
+            match key.as_str() {
+                "bar" | "bars" | "bar_color" => theme.bar = color,
+                "button" | "buttons" | "btn" | "controls" => {
+                    theme.buttons = color;
+                    custom_buttons = true;
+                }
+                "heart" | "like" => theme.heart = color,
+                "before" => theme.before.fg = color,
+                "current" | "active" => {
+                    theme.current.fg = color;
+                    custom_current = true;
+                }
+                "after" => theme.after.fg = color,
+                _ => {}
+            }
+        }
+
+        if custom_current && !custom_buttons {
+            theme.buttons = theme.current.fg;
+        }
+
+        theme
+    }
+}
+
+fn config_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let user_dir = crate::spotify::config_dir();
+    paths.push(user_dir.join("config.conf"));
+    paths.push(user_dir.join("lyrics.conf"));
+    paths.push(PathBuf::from("/etc/lyrics/config.conf"));
+    paths.push(PathBuf::from("/etc/lyrics/lyrics.conf"));
+    paths
+}
+
+pub fn parse_color(val: &str) -> Option<Rgb> {
+    let s = val.trim().trim_matches(['"', '\'']).to_lowercase();
+    match s.as_str() {
+        "cyan" => return Some(Rgb(0, 255, 255)),
+        "white" => return Some(Rgb(255, 255, 255)),
+        "red" => return Some(Rgb(255, 0, 0)),
+        "green" => return Some(Rgb(0, 255, 0)),
+        "blue" => return Some(Rgb(0, 0, 255)),
+        "yellow" => return Some(Rgb(255, 255, 0)),
+        "magenta" | "purple" => return Some(Rgb(255, 0, 255)),
+        "black" => return Some(Rgb(0, 0, 0)),
+        "gray" | "grey" => return Some(Rgb(128, 128, 128)),
+        _ => {}
+    }
+
+    let hex = s.strip_prefix('#').unwrap_or(&s);
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        return Some(Rgb(r, g, b));
+    }
+    if hex.len() == 3 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let r = u8::from_str_radix(&hex[0..1], 16).ok()?;
+        let g = u8::from_str_radix(&hex[1..2], 16).ok()?;
+        let b = u8::from_str_radix(&hex[2..3], 16).ok()?;
+        return Some(Rgb(r * 17, g * 17, b * 17));
+    }
+
+    let body = s
+        .strip_prefix("rgb(")
+        .and_then(|b| b.strip_suffix(')'))
+        .unwrap_or(&s);
+
+    let parts: Vec<&str> = body
+        .split([',', ' '])
+        .filter(|part| !part.trim().is_empty())
+        .collect();
+    if parts.len() == 3 {
+        let r = parts[0].trim().parse::<u8>().ok()?;
+        let g = parts[1].trim().parse::<u8>().ok()?;
+        let b = parts[2].trim().parse::<u8>().ok()?;
+        return Some(Rgb(r, g, b));
+    }
+
+    None
+}
+
+static THEME_INSTANCE: OnceLock<Theme> = OnceLock::new();
+
+pub fn theme() -> &'static Theme {
+    THEME_INSTANCE.get_or_init(Theme::load)
+}
 
 pub const BAR_WIDTH: usize = 2;
 const BAR_GAP: usize = 1;
@@ -74,10 +200,10 @@ pub fn draw_bars(frame: &mut Frame, layout: &BarLayout, values: &[f32]) {
         let x0 = layout.column(i);
         for x in x0..x0 + BAR_WIDTH {
             for level in 0..full {
-                frame.fill_bg(x, frame.height - 1 - level, THEME.bar);
+                frame.fill_bg(x, frame.height - 1 - level, theme().bar);
             }
             if partial > 0 && full < frame.height {
-                frame.put_glyph(x, frame.height - 1 - full, BLOCKS[partial], THEME.bar);
+                frame.put_glyph(x, frame.height - 1 - full, BLOCKS[partial], theme().bar);
             }
         }
     }
@@ -190,9 +316,9 @@ impl LyricsPane {
         for (y, row) in self.rows.iter().enumerate() {
             let Some((text, kind)) = row else { continue };
             let style = match kind {
-                Kind::Before => &THEME.before,
-                Kind::Current => &THEME.current,
-                Kind::After => &THEME.after,
+                Kind::Before => &theme().before,
+                Kind::Current => &theme().current,
+                Kind::After => &theme().after,
             };
             let x = frame.width.saturating_sub(text_width(text)) / 2;
             frame.put_text(x, y, text, style.fg, style.attr);
@@ -497,5 +623,42 @@ mod tests {
         screen.draw(&frame, &mut out);
         assert!(out.contains("48;2;86;95;137"));
         assert!(out.contains('▁'));
+    }
+
+    #[test]
+    fn parse_colors_supports_hex_rgb_and_names() {
+        assert_eq!(parse_color("#ff0000"), Some(Rgb(255, 0, 0)));
+        assert_eq!(parse_color("00ff00"), Some(Rgb(0, 255, 0)));
+        assert_eq!(parse_color("#00f"), Some(Rgb(0, 0, 255)));
+        assert_eq!(parse_color("rgb(10, 20, 30)"), Some(Rgb(10, 20, 30)));
+        assert_eq!(parse_color("123, 45, 67"), Some(Rgb(123, 45, 67)));
+        assert_eq!(parse_color("cyan"), Some(Rgb(0, 255, 255)));
+        assert_eq!(parse_color("invalid"), None);
+    }
+
+    #[test]
+    fn theme_parse_reads_config_and_handles_button_inheritance() {
+        let conf = r##"
+            # Mi tema personalizado
+            bar = "#123456"
+            before = "rgb(100, 100, 100)"
+            current = "#ff00ff"
+            after = "50, 60, 70"
+            heart = "#e02020"
+        "##;
+        let theme = Theme::parse(conf);
+        assert_eq!(theme.bar, Rgb(0x12, 0x34, 0x56));
+        assert_eq!(theme.before.fg, Rgb(100, 100, 100));
+        assert_eq!(theme.current.fg, Rgb(255, 0, 255));
+        // Sin `buttons` explícito, hereda `current.fg`
+        assert_eq!(theme.buttons, Rgb(255, 0, 255));
+        assert_eq!(theme.after.fg, Rgb(50, 60, 70));
+        assert_eq!(theme.heart, Rgb(0xe0, 0x20, 0x20));
+
+        // Con `buttons` explícito
+        let conf2 = "current = cyan\nbuttons = yellow";
+        let theme2 = Theme::parse(conf2);
+        assert_eq!(theme2.current.fg, Rgb(0, 255, 255));
+        assert_eq!(theme2.buttons, Rgb(255, 255, 0));
     }
 }
